@@ -18,7 +18,8 @@ private:
     std::mutex out_buffer_mutex_;
     std::vector<std::string> incoming_buffer_;
     std::vector<std::string> outgoing_buffer_;
-    std::condition_variable in_buffer_cv_;
+
+    bool asyncronousFlag = false;
     bool autoReconnect = false;
     int missedHeartbeats = 0;
     int missedHeartbeatLimit = 3;
@@ -32,7 +33,7 @@ private:
     int period_ms;
 
 public:
-    Socket_Serial(const std::string& _IP_Address, const std::string& _port, bool _isServer);
+    Socket_Serial(const std::string& _IP_Address, const std::string& _port, bool _isServer, bool _asyncronousFlag = true);
     ~Socket_Serial();
 
     void connect(bool blocking_flag, bool auto_reconnect, int _period_ms);
@@ -45,6 +46,9 @@ public:
     void clearOutBuffer();
     void flushSocket();
 
+    /// <summary>
+    /// Allows synchronous operation (primarily for debug)
+    /// </summary>
     void synchronousUpdate();
 
 

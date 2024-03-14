@@ -58,17 +58,17 @@ int main() {
 	if (userInput == 'y') { autoReconnect = true; }
 	else { autoReconnect = false; }
 
-	auto soc = std::make_shared < Socket_Serial>(ip, port, isServer);
+	auto soc = std::make_shared < Socket_Serial>(ip, port, isServer,true);
 	std::cout << "socket initialized" << std::endl;
 
-	//soc.connect(true, autoReconnect, period_ms);
+	soc->connect(true, autoReconnect, period_ms);
 	//std::cout << "socket connected" << std::endl;
 
 	
 	std::thread inputThread(inputThread);
 	while (!killCommand)
 	{
-		soc->synchronousUpdate();
+		//soc->synchronousUpdate();
 
 		std::string outMessage = "";
 

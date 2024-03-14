@@ -3,9 +3,10 @@
 #include <chrono>
 #include <iostream>
 
-Socket_Serial::Socket_Serial(const std::string& _IP_Address, const std::string& _port, bool _isServer)
+Socket_Serial::Socket_Serial(const std::string& _IP_Address, const std::string& _port, bool _isServer, bool _asyncronousFlag)
     : io_service_(), socket_(io_service_) {
     
+    asyncronousFlag = _asyncronousFlag;
     IP_Address = _IP_Address;
     port = _port;
     isServer = _isServer;
@@ -13,9 +14,9 @@ Socket_Serial::Socket_Serial(const std::string& _IP_Address, const std::string& 
 
 void Socket_Serial::synchronousUpdate()
 {
+    if (asyncronousFlag) { return; } //no need to call syncronousUpdate in async mode
     doConnection();
     doSerial();
-
 }
 
 Socket_Serial::~Socket_Serial() {
@@ -23,6 +24,8 @@ Socket_Serial::~Socket_Serial() {
 }
 
 void Socket_Serial::connect(bool blocking_flag, bool auto_reconnect, int _period_ms) {
+    if (!asyncronousFlag) { return; }
+
     period_ms = _period_ms;
     autoReconnect = auto_reconnect;
 
@@ -103,20 +106,24 @@ void Socket_Serial::flushSocket() {
 }
 
 void Socket_Serial::connectionThread() {
+    if (!asyncronousFlag) { return; }
+
     bool connectionOneShot = true;
 
     while (!killFlag && (autoReconnect || connectionOneShot)) {
         if (!connectedFlag)
         {
+            if (serial_thread_.joinable())
+            { serial_thread_.join(); }
+
             doConnection();
 
             if (socket_.is_open()) 
             {
                 serial_thread_ = std::thread(&Socket_Serial::serialThread, this);
+                connectionOneShot = false;
             }
         }
-        
-
         std::this_thread::sleep_for(std::chrono::seconds(1));
     }
 }
@@ -124,13 +131,11 @@ void Socket_Serial::connectionThread() {
 void Socket_Serial::doConnection()
 {
     try {
-        boost::asio::ip::tcp::resolver resolver(io_service_);
-        boost::asio::ip::tcp::resolver::query query(boost::asio::ip::tcp::v4(), IP_Address, port);
-        boost::asio::ip::tcp::resolver::iterator endpoint_iterator = resolver.resolve(query);
-
         if (!connectedFlag) {
-            if (serial_thread_.joinable())
-            { serial_thread_.join(); }
+
+            boost::asio::ip::tcp::resolver resolver(io_service_);
+            boost::asio::ip::tcp::resolver::query query(boost::asio::ip::tcp::v4(), IP_Address, port);
+            boost::asio::ip::tcp::resolver::iterator endpoint_iterator = resolver.resolve(query);
 
             if (isServer) {
                 boost::asio::ip::tcp::acceptor acceptor(io_service_, *endpoint_iterator);
@@ -148,12 +153,12 @@ void Socket_Serial::doConnection()
     }
     catch (const std::exception& e) {
         // Catch and print standard exceptions
-        std::cerr << "Exception caught: " << e.what() << std::endl;
+        std::cerr << "Connection Exceptions: " << e.what() << std::endl;
         //closeSocket();
     }
     catch (...) {
         // Catch and print any other exception
-        std::cerr << "Unknown exception caught." << std::endl;
+        std::cerr << "Unknown exception caught in connection." << std::endl;
     }
 }
 
@@ -178,7 +183,9 @@ void Socket_Serial::closeSocket()
 }
 
 void Socket_Serial::serialThread() {
-    while (!killFlag) {
+    if (!asyncronousFlag) { return; }
+
+    while (!killFlag && connectedFlag) {
         doSerial();
         std::this_thread::sleep_for(std::chrono::milliseconds(period_ms));
     }
@@ -186,11 +193,8 @@ void Socket_Serial::serialThread() {
 
 void Socket_Serial::doSerial()
 {
-    if (connectedFlag)
-    {
-        sendMessages();
-        readMessages();
-    }
+    sendMessages();
+    readMessages();
 }
 
 void Socket_Serial::sendMessages() {
@@ -238,7 +242,6 @@ void Socket_Serial::readMessages() {
                 if (message != heartBeat) {  // Compare against null character
                     std::lock_guard<std::mutex> lock(in_buffer_mutex_);
                     incoming_buffer_.emplace_back(message);
-                    in_buffer_cv_.notify_one();
                 }
             }
             missedHeartbeats = 0;
