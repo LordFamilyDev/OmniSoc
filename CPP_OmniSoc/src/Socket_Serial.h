@@ -1,5 +1,5 @@
-#ifndef SERIAL_MANAGER_HPP
-#define SERIAL_MANAGER_HPP
+#ifndef SOCKET_SERIAL_H
+#define SOCKET_SERIAL_H
 
 #include <boost/asio.hpp>
 #include <string>
@@ -37,18 +37,29 @@ public:
 
     void connect(bool blocking_flag, bool auto_reconnect, int _period_ms);
     void disconnect();
-    void send(const std::string& msg, bool send_now_flag = false);
-    std::vector<std::string> receive(int count = -1, bool wait_flag = false);
+    void send(const std::string& msg);
+    std::vector<std::string> receive(int count = -1);
+
     bool isConnected();
     void clearInBuffer();
     void clearOutBuffer();
     void flushSocket();
 
+    void synchronousUpdate();
+
+
 private:
     void connectionThread();
     void serialThread();
+
+    void doConnection();
+    void doSerial();
+
     void sendMessages();
     void readMessages();
+
+
+    void closeSocket();
 };
 
-#endif // SERIAL_MANAGER_HPP
+#endif // SOCKET_SERIAL_H

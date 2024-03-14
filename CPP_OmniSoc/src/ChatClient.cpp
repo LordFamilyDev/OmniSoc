@@ -58,16 +58,18 @@ int main() {
 	if (userInput == 'y') { autoReconnect = true; }
 	else { autoReconnect = false; }
 
-	Socket_Serial soc(ip, port, isServer);
+	auto soc = std::make_shared < Socket_Serial>(ip, port, isServer);
 	std::cout << "socket initialized" << std::endl;
 
-	soc.connect(true, autoReconnect, period_ms);
-	std::cout << "socket connected" << std::endl;
+	//soc.connect(true, autoReconnect, period_ms);
+	//std::cout << "socket connected" << std::endl;
 
 	
 	std::thread inputThread(inputThread);
 	while (!killCommand)
 	{
+		soc->synchronousUpdate();
+
 		std::string outMessage = "";
 
 		if (inputAvailable.exchange(false))
@@ -77,18 +79,21 @@ int main() {
 
 		if (outMessage.size() > 0)
 		{
-			soc.send(outMessage);
+			soc->send(outMessage);
 		}
 		
 
-		std::vector<std::string> inMsgs = soc.receive();
+		std::vector<std::string> inMsgs = soc->receive();
 		for (int i = 0; i < inMsgs.size(); i++)
 		{ 
 			std::cout << inMsgs[i] << std::endl; 
 		}
+	}
+	soc->disconnect();
 
-		if (!soc.isConnected())
-		{ killCommand = true; }
+	if (inputThread.joinable())
+	{
+		inputThread.join();
 	}
 	
 
