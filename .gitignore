@@ -1,32 +1,63 @@
-# Prerequisites
-*.d
+# General Python artifacts
+*.pyc
+*.pyo
+__pycache__/
+*.pyd
+*.pyc
+*.egg-info/
+dist/
+build/
+install/
+logs/
+*.egg
+.cache
+.pytest_cache/
 
-# Compiled Object files
-*.slo
-*.lo
+# Jupyter notebook checkpoints
+.ipynb_checkpoints/
+
+# C/C++ artifacts
 *.o
-*.obj
-
-# Precompiled Headers
-*.gch
-*.pch
-
-# Compiled Dynamic libraries
+*.a
 *.so
 *.dylib
-*.dll
-
-# Fortran module files
-*.mod
-*.smod
-
-# Compiled Static libraries
-*.lai
-*.la
-*.a
 *.lib
-
-# Executables
+*.d
 *.exe
 *.out
 *.app
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+
+# Colcon workspace specific
+build/
+install/
+log/
+src/
+
+# Editor settings and backups
+*.sublime-*
+*.swp
+*.bak
+*.tmp
+*~
+*.vscode/
+.idea/
+*.orig
+
+# Hidden system files
+.DS_Store
+Thumbs.db
+
+# Others
+*.tar.gz
+*.zip
+*.rar
+*.tar
+
+# Environment files
+.env
+*.venv
+*.conda-env
