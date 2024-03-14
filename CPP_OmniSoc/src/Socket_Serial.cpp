@@ -43,6 +43,13 @@ void Socket_Serial::connect(bool blocking_flag, bool auto_reconnect, int _period
 void Socket_Serial::disconnect() {
     try
     {
+        if (acceptor_ != nullptr && acceptor_->is_open())
+        { acceptor_->close(); }
+    }
+    catch(...){}
+
+    try
+    {
         std::cout << "Connection Closed" << std::endl;
         autoReconnect = false;
         killFlag = true;
@@ -138,8 +145,9 @@ void Socket_Serial::doConnection()
             boost::asio::ip::tcp::resolver::iterator endpoint_iterator = resolver.resolve(query);
 
             if (isServer) {
-                boost::asio::ip::tcp::acceptor acceptor(io_service_, *endpoint_iterator);
-                acceptor.accept(socket_);
+                acceptor_ = std::make_shared < boost::asio::ip::tcp::acceptor>(io_service_, *endpoint_iterator);
+                bool acceptError = false;
+                acceptor_->accept(socket_);
             }
             else {
                 boost::asio::connect(socket_, endpoint_iterator);
@@ -153,7 +161,7 @@ void Socket_Serial::doConnection()
     }
     catch (const std::exception& e) {
         // Catch and print standard exceptions
-        std::cerr << "Connection Exceptions: " << e.what() << std::endl;
+        std::cerr << "Connection Exception: " << e.what() << std::endl;
         //closeSocket();
     }
     catch (...) {

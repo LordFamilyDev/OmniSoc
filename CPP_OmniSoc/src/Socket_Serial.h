@@ -12,6 +12,7 @@ class Socket_Serial {
 private:
     boost::asio::io_service io_service_;
     boost::asio::ip::tcp::socket socket_;
+    std::shared_ptr<boost::asio::ip::tcp::acceptor> acceptor_;
     std::thread connection_thread_;
     std::thread serial_thread_;
     std::mutex in_buffer_mutex_;
