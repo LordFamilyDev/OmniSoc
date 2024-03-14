@@ -8,3 +8,5 @@ Goals of OmniSoc:
 -standardized tcp protocol including message structuring, drop detection, and auto-reconnect 
 
 -easily portable into existing projects (portable standalone lib/binaries)
+
+-TODO: look into protobuff and msgpack for object serialization/deserialization
