@@ -4,11 +4,36 @@
 
  ##  Contents
 
-- Setup
+- Why Ros2?
+- ROS2 cheat sheet
 - Run
+- Setup  
   
-  
-  
+## Why Ros2?
+
+## Ros2 Cheat Sheet
+- ros2 topic list
+- ros2 topic echo <topic_name>
+- rqt_graph
+- colcon build (from work space level)
+- ros2 pkg create --build-type ament_python chat_client_py (ament_cmake)
+
+
+## Run
+
+- run alias for workspace: (Do this for every new terminal / build)
+source_ros2Soc
+
+- run client
+ros2 run chat_client_py chat
+
+- (do this twice for two clients)
+
+- look at message traffic with:
+	ros2 topic echo chat 
+
+- look at graph
+	rqt_graph
 
 ## Setup
 
@@ -54,7 +79,7 @@
 	- update current terminal with new .bashrc (all new terminals will automatically update)
 	````source ~/.bashrc````
 
-	- build ros2Soc.  navigate to ros2Soc and run 'colcon build'
+	- build ros2Soc.  navigate to ros2Soc and run 'colcon build --symlink-install'
 
 
 source  /opt/ros/iron/setup.bash
@@ -85,12 +110,3 @@ https://www.youtube.com/watch?v=xbWaHARjSmk
 ### Iphone ???
 
 - might be better just to have a ros bridge
-
-
-## Run
-
-- run alias for workspace:
-source_ros2Soc
-
-- run client
-ros2 run ros2Soc chat_client_py
