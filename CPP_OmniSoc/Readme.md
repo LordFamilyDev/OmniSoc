@@ -1,5 +1,6 @@
 # Usage
-- build project (omnisoc compiles to a static lib)
+- build project with cmake (omnisoc compiles to a static lib)
+- Chat client can be used to test the functionality of the lib after building
 - include the protocol that you intend to use (they do not conflict)
 - initialize the base class (use a shared pointer if you want it to be copyable)
 - run connect
