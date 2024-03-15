@@ -15,8 +15,15 @@
 - ros2 topic list
 - ros2 topic echo <topic_name>
 - rqt_graph
-- colcon build (from work space level)
+- colcon build (from work space level: ros2Soc folder)
 - ros2 pkg create --build-type ament_python chat_client_py (ament_cmake)
+
+- Publish
+	Loop -
+	ros2 topic pub /chat message_definitions/msg/ChatMessage "{number: 1, timestamp: {sec: 0, nanosec: 0}, message: 'Hello from CLI'}"
+	Once -
+	ros2 topic pub /chat message_definitions/msg/ChatMessage "{number: 1, timestamp: {sec: 0, nanosec: 0}, message: 'Hello from CLI'}" -1
+
 
 
 ## Run
