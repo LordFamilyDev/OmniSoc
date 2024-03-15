@@ -27,7 +27,8 @@ private:
     bool isServer = false;
     bool connectedFlag = false;
     bool killFlag = false;
-    std::string heartBeat = ";";
+    std::string msgDelimiter = ";";
+    std::string inMessageRemainder = "";
 
     std::string IP_Address;
     std::string port;
@@ -52,6 +53,9 @@ public:
     /// </summary>
     void synchronousUpdate();
 
+    static std::vector<std::string> Socket_Serial::splitMessage(const std::string& message, const std::string& delimiter, std::string& remainder);
+
+    bool suppressCatchPrints = true;
 
 private:
     void connectionThread();

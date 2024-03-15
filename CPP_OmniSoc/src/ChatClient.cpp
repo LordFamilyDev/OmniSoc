@@ -61,7 +61,7 @@ int main() {
 	auto soc = std::make_shared < Socket_Serial>(ip, port, isServer,true);
 	std::cout << "socket initialized" << std::endl;
 
-	soc->connect(true, autoReconnect, period_ms);
+	soc->connect(false, autoReconnect, period_ms);
 	//std::cout << "socket connected" << std::endl;
 
 	

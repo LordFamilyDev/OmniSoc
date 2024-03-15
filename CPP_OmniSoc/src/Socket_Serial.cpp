@@ -63,12 +63,10 @@ void Socket_Serial::disconnect() {
         closeSocket();
     }
     catch (const std::exception& e) {
-        // Catch and print standard exceptions
-        std::cerr << "Exception caught: " << e.what() << std::endl;
+        if (!suppressCatchPrints) { std::cerr << "Exception caught: " << e.what() << std::endl; }
     }
     catch (...) {
-        // Catch and print any other exception
-        std::cerr << "Unknown exception caught." << std::endl;
+        if (!suppressCatchPrints) { std::cerr << "Unknown exception caught." << std::endl; }
     }
 }
 
@@ -161,12 +159,12 @@ void Socket_Serial::doConnection()
     }
     catch (const std::exception& e) {
         // Catch and print standard exceptions
-        std::cerr << "Connection Exception: " << e.what() << std::endl;
+        if (!suppressCatchPrints) { std::cerr << "Connection Exception: " << e.what() << std::endl; }
         //closeSocket();
     }
     catch (...) {
         // Catch and print any other exception
-        std::cerr << "Unknown exception caught in connection." << std::endl;
+        if (!suppressCatchPrints) { std::cerr << "Unknown exception caught in connection." << std::endl; }
     }
 }
 
@@ -215,15 +213,16 @@ void Socket_Serial::sendMessages() {
         if (!outgoing_buffer_.empty()) {
             for (const auto& msg : outgoing_buffer_) {
                 boost::asio::write(socket_, boost::asio::buffer(msg));
+                boost::asio::write(socket_, boost::asio::buffer(msgDelimiter));
             }
             outgoing_buffer_.clear();
         }
         else {
-            boost::asio::write(socket_, boost::asio::buffer(heartBeat));
+            boost::asio::write(socket_, boost::asio::buffer(msgDelimiter));
         }
     }
     catch (...) {
-        std::cerr << "Write error: "  << std::endl;
+        if (!suppressCatchPrints) { std::cerr << "Write error: " << std::endl; }
         closeSocket();
     }
 }
@@ -246,13 +245,25 @@ void Socket_Serial::readMessages() {
         else if (!error) {
             if (bytes_read > 0) {
                 std::string message(buffer, bytes_read);
+                std::string tempRemainder;
+                std::vector<std::string> msgs = splitMessage(message, msgDelimiter, tempRemainder);
+                for (int i = 0; i < msgs.size(); i++)
+                {
+                    std::string isolatedMessage = "";
+                    if (i == 0 && inMessageRemainder.size()>0)
+                    { isolatedMessage = inMessageRemainder + msgs[i]; }
+                    else
+                    { isolatedMessage = msgs[i]; }
 
-                if (message != heartBeat) {  // Compare against null character
-                    std::lock_guard<std::mutex> lock(in_buffer_mutex_);
-                    incoming_buffer_.emplace_back(message);
+                    if (isolatedMessage.size() > 0)
+                    {
+                        std::lock_guard<std::mutex> lock(in_buffer_mutex_);
+                        incoming_buffer_.emplace_back(isolatedMessage);
+                    }
                 }
+                inMessageRemainder = tempRemainder;
+                missedHeartbeats = 0;
             }
-            missedHeartbeats = 0;
         }
         else
         {
@@ -260,7 +271,26 @@ void Socket_Serial::readMessages() {
         }
     }
     catch (...) {
-        std::cerr << "Read error: " << std::endl;
+        if (!suppressCatchPrints) { std::cerr << "Read error: " << std::endl; }
         closeSocket();
     }
+}
+
+std::vector<std::string> Socket_Serial::splitMessage(const std::string& message, const std::string& delimiter, std::string& remainder) {
+    std::string inMsg = message;
+    std::vector<std::string> messages;
+    size_t pos = 0;
+    std::string token;
+
+    while ((pos = inMsg.find(delimiter)) != std::string::npos) {
+        token = inMsg.substr(0, pos);
+        messages.push_back(token);
+        inMsg.erase(0, pos + delimiter.length());
+    }
+
+    if (!inMsg.empty()) {
+        remainder = inMsg;
+    }
+
+    return messages;
 }
