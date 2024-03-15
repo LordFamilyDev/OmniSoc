@@ -1,0 +1,3 @@
+int32 number
+builtin_interfaces/Time timestamp
+string message
