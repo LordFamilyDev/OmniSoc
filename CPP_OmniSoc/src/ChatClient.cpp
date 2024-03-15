@@ -65,7 +65,7 @@ int main() {
 	auto soc = std::make_shared < Socket_Serial>(ip, port, isServer, asyncFlag);
 	std::cout << "socket initialized" << std::endl;
 
-	if (asyncFlag) { soc->connect(true, autoReconnect, period_ms); }
+	if (asyncFlag) { soc->connect(false, autoReconnect, period_ms); }
 	//std::cout << "socket connected" << std::endl;
 
 	
@@ -89,7 +89,7 @@ int main() {
 			outMessage = threadedInput;
 		}
 
-		if (outMessage.size() > 0)
+		if (outMessage.size() > 0 && soc->isConnected()) //technically connected check is optional due to buffers, but its bad practice to pack the buffers while socket is disconnected
 		{
 			soc->send(outMessage);
 		}
