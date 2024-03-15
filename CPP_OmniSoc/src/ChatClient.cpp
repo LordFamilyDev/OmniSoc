@@ -3,7 +3,7 @@
 #include <thread>
 #include "Socket_Serial.h"
 
-int period_ms = 100;
+int period_ms = 1; //arbitrarily low test period.  havent tried sub ms
 bool killCommand = false;
 std::string killInput = "x";
 
@@ -29,11 +29,15 @@ int main() {
 	//input timeout
 	std::chrono::milliseconds timeout(period_ms);
 	
+	bool asyncFlag = true;//false (syncronous mode) is mostly for debugging
 
 	std::string ip;
 	std::string port;
 	bool isServer = false;
 	bool autoReconnect = false;
+
+	std::cout << "Omni Soc chat client." << std::endl;
+	std::cout << "x after initial selections to terminate" << std::endl;
 
 	char userInput;
 	std::cout << "c:client, s:server" << std::endl;
@@ -58,17 +62,25 @@ int main() {
 	if (userInput == 'y') { autoReconnect = true; }
 	else { autoReconnect = false; }
 
-	auto soc = std::make_shared < Socket_Serial>(ip, port, isServer,true);
+	auto soc = std::make_shared < Socket_Serial>(ip, port, isServer, asyncFlag);
 	std::cout << "socket initialized" << std::endl;
 
-	soc->connect(false, autoReconnect, period_ms);
+	if (asyncFlag) { soc->connect(true, autoReconnect, period_ms); }
 	//std::cout << "socket connected" << std::endl;
 
 	
 	std::thread inputThread(inputThread);
 	while (!killCommand)
 	{
-		//soc->synchronousUpdate();
+		if (!asyncFlag) 
+		{ 
+			soc->synchronousUpdate(); 
+			std::this_thread::sleep_for(std::chrono::milliseconds(period_ms)); //this is neccesary with syncrhonous to keep from breaking heartbeat with would_block errors
+		}
+		else
+		{
+			std::this_thread::sleep_for(std::chrono::milliseconds(period_ms));//this is optional, but keeps this thread from being a busy thread
+		}
 
 		std::string outMessage = "";
 
@@ -88,6 +100,8 @@ int main() {
 		{ 
 			std::cout << inMsgs[i] << std::endl; 
 		}
+
+
 	}
 	soc->disconnect();
 

@@ -152,6 +152,7 @@ void Socket_Serial::doConnection()
             }
 
             if (socket_.is_open()) {
+                socket_.non_blocking(true);
                 std::cout << "socket connected" << std::endl;
                 connectedFlag = true;
             }
@@ -185,6 +186,18 @@ void Socket_Serial::closeSocket()
             std::cerr << "Failed to close socket: " << ec.message() << std::endl;
         }
     }
+    
+    try
+    {
+        if (!autoReconnect && acceptor_ != nullptr && acceptor_->is_open())
+        {
+            acceptor_->close();
+        }
+    }
+    catch (...) {}
+    
+
+
     connectedFlag = false;
 }
 
@@ -236,9 +249,10 @@ void Socket_Serial::readMessages() {
         boost::system::error_code error;
         size_t bytes_read = socket_.read_some(boost::asio::buffer(buffer), error);
 
-        if (error == boost::asio::error::eof) {
+        if (error == boost::asio::error::eof || error == boost::asio::error::would_block) {
             missedHeartbeats++;
             if (missedHeartbeats >= missedHeartbeatLimit) {
+                std::cout << "Heartbeat kill: " << missedHeartbeats << std::endl;
                 closeSocket();
             }
         }
@@ -261,7 +275,11 @@ void Socket_Serial::readMessages() {
                         incoming_buffer_.emplace_back(isolatedMessage);
                     }
                 }
-                inMessageRemainder = tempRemainder;
+                if (msgs.size() > 0)
+                { inMessageRemainder = tempRemainder; }
+                else
+                { inMessageRemainder = inMessageRemainder + tempRemainder; }
+                
                 missedHeartbeats = 0;
             }
         }

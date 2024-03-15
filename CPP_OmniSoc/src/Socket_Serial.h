@@ -23,7 +23,6 @@ private:
     bool asyncronousFlag = false;
     bool autoReconnect = false;
     int missedHeartbeats = 0;
-    int missedHeartbeatLimit = 3;
     bool isServer = false;
     bool connectedFlag = false;
     bool killFlag = false;
@@ -50,12 +49,14 @@ public:
 
     /// <summary>
     /// Allows synchronous operation (primarily for debug)
+    /// If you call this too fast (without a delay) it will crash for heartbeat due to would_block errors
     /// </summary>
     void synchronousUpdate();
 
     static std::vector<std::string> Socket_Serial::splitMessage(const std::string& message, const std::string& delimiter, std::string& remainder);
 
     bool suppressCatchPrints = true;
+    int missedHeartbeatLimit = 5;
 
 private:
     void connectionThread();
