@@ -4,7 +4,7 @@
 - Either copy files into local directory, or add library directory for import
 - Initialize the SerialManager object with a hardware or software serial port and connect with the specified baud rate.
 - This library does not check if you are overloading the entered baud rate.
-- Rough baud rate calculation:
+- Rough baud rate calculation: (10 * (4 + 4 * (floatsPerMessage) ) * (messagesPerSecond) * 2
  - each byte is 10 bits
  - message header (with checksum) costs 4 bytes
  - each float is an additional 4 bytes
