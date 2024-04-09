@@ -5,10 +5,11 @@
 - initialize the base class (use a shared pointer if you want it to be copyable)
 - run connect
 - interact with serial object through 3 primary functions:
--- isConnected()
--- receive()
--- send()
+  - isConnected()
+  - receiveMessage()
+  - sendMessage()
 - omnisoc will handle socket connection and message buffering.
+- omnisoc implementations should be able to handle fixed frequency and irregular messages concurrently.
 
 # Additional notes
 - This class is intended to be run in asyncronous mode, but is also fully functional in syncronous mode.
