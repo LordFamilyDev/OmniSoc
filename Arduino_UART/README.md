@@ -5,7 +5,7 @@
 - Initialize the SerialManager object with a hardware or software serial port and connect with the specified baud rate.
 - This library does not check if you are overloading the entered baud rate.
 - If only sending messages, simply make calls to sendMessage.
-- If sending and receiving messages, call handleSynchronization() followed by receiveMessage().
+- If sending and receiving messages, call handleSynchronization() followed by receiveMessage() at the top of every loop.
 
 # Notes
 - Due to memory limits on arduino, a software buffer was not implemented and therefore receiveMessage should either be called every loop, or else called multiple times until all messages have been read.
