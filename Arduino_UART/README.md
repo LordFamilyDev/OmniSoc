@@ -9,7 +9,7 @@
   - message header (with checksum) costs 4 bytes
   - each float is an additional 4 bytes
   - leave at least 10% baud rate overhead to allow syncronization (double target baud rate if non-regular messaging is also being used)
-  - Example: 3 float standard message at 10ms interval (100hz): 160 bits per message, 16000 bits/sec, min baud 19200, 57600 to support non-regular messaging
+  - Example: 3 float standard message at 10ms interval (100hz): 160 bits per message, 16000 bits/sec, min baud 19200, 38400 to support non-regular messaging
 - If only sending messages, simply make calls to sendMessage.
 - If sending and receiving messages, call handleSynchronization() followed by receiveMessage() at the top of every loop.
 
