@@ -49,10 +49,10 @@ void loop() {
 
     {
       int header = 1;
-      float data[3] = {1.23, 4.56, (float)millis()};
+      float tempData[3] = {1.23, 4.56, (float)millis()};
       int numFloats = 3;
       //send arbitrary data
-      int result = omniSoc.sendMessage(header,data,numFloats);
+      int result = omniSoc.sendMessage(header,tempData,numFloats);
       //Serial.println(result);
     }
   }
@@ -63,10 +63,10 @@ void loop() {
     debugClock = millis();
 
     int header = 5;
-    float data[1] = {5000};
+    float tempData[1] = {5000};
     int numFloats = 1;
     //send arbitrary data
-    int result = omniSoc.sendMessage(header,data,numFloats);
+    int result = omniSoc.sendMessage(header,tempData,numFloats);
   }
 
   //monitor connection and display connection status on pin 13
