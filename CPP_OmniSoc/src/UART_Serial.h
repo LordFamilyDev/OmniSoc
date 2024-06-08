@@ -4,7 +4,9 @@
 #include <boost/asio.hpp>
 #include <iostream>
 #include <vector>
-#include <chrono>
+#include <thread>
+#include <mutex>
+#include <atomic>
 
 class UART_Serial {
 public:
@@ -14,8 +16,12 @@ public:
     void connect();
     void disconnect();
     bool isConnected();
+    size_t available();
 
+    //attempts to clear until the end of a message (blocking).
     void flushIncomingSerial();
+
+    //flush asyncronously on a background thread (non-blocking)
     bool asyncFlushIncomingSerial();
     void handleSynchronization();
 
@@ -23,12 +29,21 @@ public:
     int receiveMessage(int& header, std::vector<float>& data);
 
 private:
+    void readFromSerial();
+    void startWorkThreads();
+    void stopWorkThreads();
+
     boost::asio::io_service io_service_;
     boost::asio::serial_port serial_;
-    boost::asio::streambuf buffer_;
     std::string port_;
     unsigned int baud_rate_;
     int timeoutPeriod_ms_;
+
+    std::vector<char> buffer_;
+    std::mutex buffer_mutex_;
+    std::atomic<bool> running_;
+    std::thread read_thread_;
+    std::thread sync_thread_;
 
     static constexpr int HEADER_SIZE = 2;
     static constexpr int CHECKSUM_SIZE = 1;

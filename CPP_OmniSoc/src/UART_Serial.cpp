@@ -1,7 +1,7 @@
 #include "UART_Serial.h"
 
 UART_Serial::UART_Serial(const std::string& port, unsigned int baud_rate, int timeoutPeriod_ms)
-    : serial_(io_service_), port_(port), baud_rate_(baud_rate), timeoutPeriod_ms_(timeoutPeriod_ms) {}
+    : serial_(io_service_), port_(port), baud_rate_(baud_rate), timeoutPeriod_ms_(timeoutPeriod_ms), running_(false) {}
 
 UART_Serial::~UART_Serial() {
     disconnect();
@@ -17,9 +17,14 @@ void UART_Serial::connect() {
     serial_.set_option(boost::asio::serial_port_base::baud_rate(baud_rate_));
     byteSpacingTime_us = static_cast<long>(ceil(10000000.0 / baud_rate_));
     timeoutFlag = false;
+
+    startWorkThreads();
 }
 
 void UART_Serial::disconnect() {
+    timeoutFlag = true;
+    serial_.cancel();
+    stopWorkThreads();
     if (serial_.is_open()) {
         serial_.close();
     }
@@ -29,10 +34,17 @@ bool UART_Serial::isConnected() {
     return !timeoutFlag;
 }
 
+size_t UART_Serial::available() {
+    std::lock_guard<std::mutex> lock(buffer_mutex_);
+    return buffer_.size();
+}
+
 void UART_Serial::flushIncomingSerial() {
     auto tempTime = std::chrono::steady_clock::now();
     while (std::chrono::steady_clock::now() - tempTime < std::chrono::microseconds(byteSpacingTime_us * 2)) {
-        if (serial_.is_open() && boost::asio::read(serial_, buffer_, boost::asio::transfer_at_least(1), boost::system::error_code())) {
+        if (available() > 0) {
+            std::lock_guard<std::mutex> lock(buffer_mutex_); //releases on scope drop
+            buffer_.clear();
             tempTime = std::chrono::steady_clock::now();
         }
     }
@@ -48,18 +60,14 @@ bool UART_Serial::asyncFlushIncomingSerial() {
         }
     }
 
-    if (serial_.is_open() && boost::asio::read(serial_, buffer_, boost::asio::transfer_at_least(1), boost::system::error_code())) {
+    bool byteReadFlag = false;
+    while (available()>0) {
+        std::lock_guard<std::mutex> lock(buffer_mutex_); //releases on scope drop
+        buffer_.clear();
         asyncFlushClock = std::chrono::steady_clock::now();
     }
 
     return false;
-}
-
-void UART_Serial::handleSynchronization() {
-    if (seekingFlag) {
-        bool flushResult = asyncFlushIncomingSerial();
-        seekingFlag = !flushResult;
-    }
 }
 
 int UART_Serial::sendMessage(int header, const std::vector<float>& data) {
@@ -92,7 +100,8 @@ int UART_Serial::sendMessage(int header, const std::vector<float>& data) {
 }
 
 int UART_Serial::receiveMessage(int& header, std::vector<float>& data) {
-    if (timeoutFlag && std::chrono::steady_clock::now() - lastTimeoutClock > std::chrono::milliseconds(timeoutPeriod_ms_)) {
+    std::lock_guard<std::mutex> lock(buffer_mutex_);
+    if (!timeoutFlag && std::chrono::steady_clock::now() - lastTimeoutClock > std::chrono::milliseconds(timeoutPeriod_ms_)) {
         timeoutFlag = true;
     }
 
@@ -105,10 +114,9 @@ int UART_Serial::receiveMessage(int& header, std::vector<float>& data) {
             return 0;
         }
 
-        std::istream is(&buffer_);
-        uint8_t headerBytes[HEADER_SIZE];
-        is.read(reinterpret_cast<char*>(headerBytes), HEADER_SIZE);
+        std::vector<uint8_t> headerBytes(buffer_.begin(), buffer_.begin() + HEADER_SIZE);
         lastHeader = (headerBytes[0] << 8) | headerBytes[1];
+        buffer_.erase(buffer_.begin(), buffer_.begin() + HEADER_SIZE);
     }
 
     if (lastNumFloats == 0) {
@@ -116,10 +124,8 @@ int UART_Serial::receiveMessage(int& header, std::vector<float>& data) {
             return 0;
         }
 
-        std::istream is(&buffer_);
-        char numFloats;
-        is.read(&numFloats, 1);
-        lastNumFloats = numFloats;
+        lastNumFloats = buffer_[0];
+        buffer_.erase(buffer_.begin());
         if (lastNumFloats > 10) {
             seekingFlag = true;
             return -3;
@@ -131,9 +137,8 @@ int UART_Serial::receiveMessage(int& header, std::vector<float>& data) {
         return 0;
     }
 
-    std::istream is(&buffer_);
-    std::vector<uint8_t> message(messageSize);
-    is.read(reinterpret_cast<char*>(message.data()), messageSize);
+    std::vector<uint8_t> message(buffer_.begin(), buffer_.begin() + messageSize);
+    buffer_.erase(buffer_.begin(), buffer_.begin() + messageSize);
 
     uint8_t checksum = computeChecksum(message.data(), messageSize - CHECKSUM_SIZE);
     if (checksum != message[messageSize - 1]) {
@@ -160,5 +165,50 @@ uint8_t UART_Serial::computeChecksum(const uint8_t* data, int size) {
         checksum ^= data[i];
     }
     return checksum;
+}
+
+void UART_Serial::readFromSerial() {
+    while (running_) {
+        char temp[1024];
+        boost::system::error_code ec;
+        std::size_t bytes_read = serial_.read_some(boost::asio::buffer(temp), ec);
+
+        if (ec && ec != boost::asio::error::would_block) {
+            std::cerr << "Error reading from serial port: " << ec.message() << std::endl;
+            continue;
+        }
+
+        std::lock_guard<std::mutex> lock(buffer_mutex_);
+        buffer_.insert(buffer_.end(), temp, temp + bytes_read);
+
+        std::this_thread::sleep_for(std::chrono::microseconds(5 * byteSpacingTime_us));//this is kinda arbitrary (could be specified)
+    }
+}
+
+void UART_Serial::handleSynchronization() {
+    //byteSpacingTime_us
+    while (running_) {
+        if (seekingFlag) {
+            bool flushResult = asyncFlushIncomingSerial();
+            seekingFlag = !flushResult;
+        }
+        std::this_thread::sleep_for(std::chrono::microseconds(byteSpacingTime_us));
+    }
+}
+
+void UART_Serial::startWorkThreads() {
+    running_ = true;
+    read_thread_ = std::thread(&UART_Serial::readFromSerial, this);
+    sync_thread_ = std::thread(&UART_Serial::handleSynchronization, this);
+}
+
+void UART_Serial::stopWorkThreads() {
+    running_ = false;
+    if (read_thread_.joinable()) {
+        read_thread_.join();
+    }
+    if (sync_thread_.joinable()) {
+        sync_thread_.join();
+    }
 }
 
