@@ -11,3 +11,6 @@ target_include_directories(OmniSoc PUBLIC ${Boost_INCLUDE_DIRS})
 
 add_executable(ChatClient ChatClient.cpp)
 target_link_libraries(ChatClient PRIVATE OmniSoc)
+
+add_executable(UART_Serial_Tester UART_Serial_Tester.cpp)
+target_link_libraries(UART_Serial_Tester PRIVATE OmniSoc)

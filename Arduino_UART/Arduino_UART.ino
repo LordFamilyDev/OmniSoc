@@ -1,7 +1,7 @@
 #include "SerialManager.h"
 
 //SerialManager omniSoc(Serial,20);
-SerialManager omniSoc(Serial1,20);
+SerialManager omniSoc(Serial,20);
 
 long period_serial_ms = 10;
 long serialClock = 0;
@@ -12,8 +12,7 @@ long debugClock = 0;
 float data[5] = {0,0,0,0,0}; //needs to be as biggest message to be received
 
 void setup() {
-  Serial.begin(115200);//115200
-
+  //Serial.begin(115200); //for debugging arduino to arduino coms with a mega
   omniSoc.connect(57600);
   pinMode(13,OUTPUT);
 }
@@ -29,16 +28,29 @@ void loop() {
     int receiveCode = omniSoc.receiveMessage(header,data,numFloats);
     if(receiveCode == 1) //new message
     {
-        Serial.print(header);
-        Serial.print(",");
-        Serial.print(numFloats);
-        Serial.print(",");
-        for(int i = 0;i<numFloats;i++)
+      /*
+        //arduino-arduino testing
+        //print message to computer serial
         {
-          Serial.print(data[i]);
+          Serial.print(header);
           Serial.print(",");
+          Serial.print(numFloats);
+          Serial.print(",");
+          for(int i = 0;i<numFloats;i++)
+          {
+            Serial.print(data[i]);
+            Serial.print(",");
+          }
+          Serial.println();
         }
-        Serial.println();
+      */
+
+      //omnisoc testing
+      //modify and reflect message
+      {
+        header+=1;
+        omniSoc.sendMessage(header,data,numFloats);
+      }
     }
   }
 
