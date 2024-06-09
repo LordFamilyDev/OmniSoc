@@ -28,10 +28,18 @@ public:
     int sendMessage(int header, const std::vector<float>& data);
     int receiveMessage(int& header, std::vector<float>& data);
 
+    static const int maxFloats = 10;
+
 private:
     void readFromSerial();
     void startWorkThreads();
     void stopWorkThreads();
+
+    void setSeekingFlag()
+    {
+        seekingFlag = true;
+        asyncFlushClock = std::chrono::steady_clock::now();
+    }
 
     boost::asio::io_service io_service_;
     boost::asio::serial_port serial_;

@@ -110,52 +110,64 @@ int UART_Serial::receiveMessage(int& header, std::vector<float>& data) {
     }
 
     if (lastHeader == -1) {
-        if (buffer_.size() < HEADER_SIZE) {
+        if (buffer_.size() < HEADER_SIZE + 1) {
             return 0;
         }
 
-        std::vector<uint8_t> headerBytes(buffer_.begin(), buffer_.begin() + HEADER_SIZE);
+        std::vector<uint8_t> headerBytes(buffer_.begin(), buffer_.begin() + HEADER_SIZE + 1);
         lastHeader = (headerBytes[0] << 8) | headerBytes[1];
-        buffer_.erase(buffer_.begin(), buffer_.begin() + HEADER_SIZE);
-    }
+        lastNumFloats = headerBytes[2];
+        buffer_.erase(buffer_.begin(), buffer_.begin() + HEADER_SIZE + 1);
+        std::cout << "last header:" << lastHeader <<" , num floats:"<<lastNumFloats<< std::endl;
 
-    if (lastNumFloats == 0) {
-        if (buffer_.size() < 1) {
-            return 0;
-        }
-
-        lastNumFloats = buffer_[0];
-        buffer_.erase(buffer_.begin());
-        if (lastNumFloats > 10) {
-            seekingFlag = true;
-            return -3;
+        if (lastNumFloats > maxFloats)
+        {
+            setSeekingFlag();
+            lastHeader = -1;
+            lastNumFloats = 0;
+            return -4;
         }
     }
-
-    int messageSize = lastNumFloats * FLOAT_SIZE + CHECKSUM_SIZE;
-    if (buffer_.size() < messageSize) {
-        return 0;
+    else
+    {
+        header = lastHeader;
     }
 
-    std::vector<uint8_t> message(buffer_.begin(), buffer_.begin() + messageSize);
-    buffer_.erase(buffer_.begin(), buffer_.begin() + messageSize);
-
-    uint8_t checksum = computeChecksum(message.data(), messageSize - CHECKSUM_SIZE);
-    if (checksum != message[messageSize - 1]) {
-        seekingFlag = true;
-        return -2;
+    int floatDataSize = lastNumFloats * FLOAT_SIZE + CHECKSUM_SIZE;
+    if (buffer_.size() < floatDataSize) {
+        return -2; //wait for complete message
     }
+
+    int messageSize = floatDataSize + HEADER_SIZE + 1;
+
+    std::vector<uint8_t> message(buffer_.begin(), buffer_.begin() + floatDataSize);
+    buffer_.erase(buffer_.begin(), buffer_.begin() + floatDataSize);
+
 
     data.resize(lastNumFloats);
     for (int i = 0; i < lastNumFloats; ++i) {
         data[i] = *reinterpret_cast<float*>(&message[i * FLOAT_SIZE]);
     }
 
-    header = lastHeader;
+    //add message header to front of message for checksum
+    uint8_t headerByte1 = (uint8_t)(lastHeader & 0xFF);
+    uint8_t headerByte2 = (uint8_t)((lastHeader >> 8) & 0xFF);
+    message.insert(message.begin(), (uint8_t)lastNumFloats);
+    message.insert(message.begin(), headerByte2);
+    message.insert(message.begin(), headerByte1);
+
     lastHeader = -1;
     lastNumFloats = 0;
-    timeoutFlag = false;
 
+    uint8_t checksum = computeChecksum(message.data(), messageSize - CHECKSUM_SIZE);
+    std::cout << "checksum: " << checksum << " ; " << message[messageSize - 1] << std::endl;
+    if (checksum != message[messageSize - 1]) {
+        setSeekingFlag();
+        return -3;
+    }
+
+    timeoutFlag = false;
+    lastTimeoutClock = std::chrono::steady_clock::now();
     return 1;
 }
 
