@@ -9,6 +9,8 @@ long serialClock = 0;
 long period_debug_print_ms = 100;
 long debugClock = 0;
 
+bool ledOnFlag = false;
+
 float data[5] = {0,0,0,0,0}; //needs to be as biggest message to be received
 
 void setup() {
@@ -50,6 +52,7 @@ void loop() {
       {
         header+=1;
         omniSoc.sendMessage(header,data,numFloats);
+        ledOnFlag = !ledOnFlag;
       }
     }
   }
@@ -82,7 +85,8 @@ void loop() {
   }
 
   //monitor connection and display connection status on pin 13
-  if(omniSoc.isConnected())
+  //if(omniSoc.isConnected())
+  if(ledOnFlag)
   {
     digitalWrite(13,LOW);
   }

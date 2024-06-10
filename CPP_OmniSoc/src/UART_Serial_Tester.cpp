@@ -62,9 +62,12 @@ int main() {
 		if (outMessage.size() > 0 && serial1->isConnected()) //technically connected check is optional due to buffers, but its bad practice to pack the buffers while socket is disconnected
 		{
 			//todo: need to convert outMessage string into meaningful uart message (header and floats)
-			int arbHeader = 5;
+			int arbHeader = 7;
 			std::vector<float> arbData = std::vector<float>();
 			arbData.push_back(5.123);
+			arbData.push_back(1);
+			arbData.push_back(2);
+			arbData.push_back(5.5);
 			serial1->sendMessage(arbHeader, arbData);
 		}
 
@@ -83,7 +86,7 @@ int main() {
 		}
 		else
 		{
-			std::cout << result << std::endl;
+			//std::cout << result << std::endl;
 		}
 	}
 	serial1->disconnect();

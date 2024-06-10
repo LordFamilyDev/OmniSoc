@@ -15,20 +15,14 @@ void SerialManager::flushIncomingSerial()
 
 bool SerialManager::asyncFlushIncomingSerial()
 {
-    if(micros() - asyncFlushClock > byteSpacingTime_us * 2)
-    {
-        if(micros() - asyncFlushClock > timeoutPeriod_ms * 1000)
-        {asyncFlushClock = micros();}
-        else
-        {return true;}
-    }
-
-    bool byteReadFlag = false;
     while(serial->available())
     {
         serial->read();
         asyncFlushClock = micros();
     }
+
+    if(micros() - asyncFlushClock > byteSpacingTime_us * 2)
+    { return true; }
 
     return false;
 }

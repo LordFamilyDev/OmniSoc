@@ -51,20 +51,15 @@ void UART_Serial::flushIncomingSerial() {
 }
 
 bool UART_Serial::asyncFlushIncomingSerial() {
-    if (std::chrono::steady_clock::now() - asyncFlushClock > std::chrono::microseconds(byteSpacingTime_us * 2)) {
-        if (std::chrono::steady_clock::now() - asyncFlushClock > std::chrono::milliseconds(timeoutPeriod_ms_)) {
-            asyncFlushClock = std::chrono::steady_clock::now();
-        }
-        else {
-            return true;
-        }
-    }
-
-    bool byteReadFlag = false;
-    while (available()>0) {
+    
+    while (available() > 0) {
         std::lock_guard<std::mutex> lock(buffer_mutex_); //releases on scope drop
         buffer_.clear();
         asyncFlushClock = std::chrono::steady_clock::now();
+    }
+    
+    if (std::chrono::steady_clock::now() - asyncFlushClock > std::chrono::microseconds(byteSpacingTime_us * 2)) {
+        return true;
     }
 
     return false;
@@ -77,13 +72,16 @@ int UART_Serial::sendMessage(int header, const std::vector<float>& data) {
 
     message[0] = (header >> 8) & 0xFF;
     message[1] = header & 0xFF;
-    message[2] = numFloats;
+    message[2] = (uint8_t)numFloats;
 
     for (int i = 0; i < numFloats; ++i) {
+        /*
         const uint8_t* floatBytes = reinterpret_cast<const uint8_t*>(&data[i]);
         for (int j = 0; j < FLOAT_SIZE; ++j) {
             message[HEADER_SIZE + 1 + i * FLOAT_SIZE + j] = floatBytes[j];
         }
+        */
+        memcpy(&message[HEADER_SIZE + 1 + i * FLOAT_SIZE], &data[i], FLOAT_SIZE);
     }
 
     uint8_t checksum = computeChecksum(message.data(), messageSize - CHECKSUM_SIZE);
@@ -192,6 +190,8 @@ void UART_Serial::readFromSerial() {
 
         std::lock_guard<std::mutex> lock(buffer_mutex_);
         buffer_.insert(buffer_.end(), temp, temp + bytes_read);
+        //TODO: this could technically overfill if read is not being called...
+
 
         std::this_thread::sleep_for(std::chrono::microseconds(5 * byteSpacingTime_us));//this is kinda arbitrary (could be specified)
     }
