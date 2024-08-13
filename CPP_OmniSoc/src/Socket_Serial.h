@@ -53,7 +53,7 @@ public:
     /// </summary>
     void synchronousUpdate();
 
-    static std::vector<std::string> Socket_Serial::splitMessage(const std::string& message, const std::string& delimiter, std::string& remainder);
+    static std::vector<std::string> splitMessage(const std::string& message, const std::string& delimiter, std::string& remainder);
 
     bool suppressCatchPrints = true;
     int missedHeartbeatLimit = 5;
