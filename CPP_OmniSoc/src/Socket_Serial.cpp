@@ -161,12 +161,12 @@ void Socket_Serial::doConnection()
     }
     catch (const std::exception& e) {
         // Catch and print standard exceptions
-        if (!suppressCatchPrints) { std::cerr << "Connection Exception: " << e.what() << std::endl; }
+        if (!suppressCatchPrints) { std::cout << "Connection Exception: " << e.what() << std::endl; }
         //closeSocket();
     }
     catch (...) {
         // Catch and print any other exception
-        if (!suppressCatchPrints) { std::cerr << "Unknown exception caught in connection." << std::endl; }
+        if (!suppressCatchPrints) { std::cout << "Unknown exception caught in connection." << std::endl; }
     }
 }
 
@@ -179,27 +179,33 @@ void Socket_Serial::closeSocket()
 
     boost::system::error_code ec;
 
-    socket_.shutdown(boost::asio::ip::tcp::socket::shutdown_both, ec);
-    if (ec && !suppressCatchPrints) {
-        std::cerr << "Failed to shutdown socket: " << ec.message() << std::endl;
-    }
-    socket_.close(ec);
-    if (ec && !suppressCatchPrints) {
-        std::cerr << "Failed to close socket: " << ec.message() << std::endl;
-    }
-    socket_.release(ec);
-    if (ec && !suppressCatchPrints) {
-        std::cerr << "Failed to release socket: " << ec.message() << std::endl;
-    }
-    
-    acceptor_->close(ec);
-    if (ec && !suppressCatchPrints) {
-        std::cerr << "Failed to close acceptor: " << ec.message() << std::endl;
+    if(socket_.is_open())
+    {
+        socket_.shutdown(boost::asio::ip::tcp::socket::shutdown_both, ec);
+        if (ec && !suppressCatchPrints) {
+            std::cerr << "Failed to shutdown socket: " << ec.message() << std::endl;
+        }
+        socket_.close(ec);
+        if (ec && !suppressCatchPrints) {
+            std::cerr << "Failed to close socket: " << ec.message() << std::endl;
+        }
+        socket_.release(ec);
+        if (ec && !suppressCatchPrints) {
+            std::cerr << "Failed to release socket: " << ec.message() << std::endl;
+        }
     }
 
-    acceptor_->release(ec);
-    if (ec && !suppressCatchPrints) {
-        std::cerr << "Failed to release acceptor: " << ec.message() << std::endl;
+    if(acceptor_ != nullptr)
+    {
+        acceptor_->close(ec);
+        if (ec && !suppressCatchPrints) {
+            std::cerr << "Failed to close acceptor: " << ec.message() << std::endl;
+        }
+
+        acceptor_->release(ec);
+        if (ec && !suppressCatchPrints) {
+            std::cerr << "Failed to release acceptor: " << ec.message() << std::endl;
+        }
     }
 
     connectedFlag = false;

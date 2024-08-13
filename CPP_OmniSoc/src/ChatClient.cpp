@@ -98,10 +98,8 @@ int main() {
 		std::vector<std::string> inMsgs = soc->receive();
 		for (int i = 0; i < inMsgs.size(); i++)
 		{ 
-			std::cout << inMsgs[i] << std::endl; 
+			std::cout << ">>" << inMsgs[i] << std::endl; 
 		}
-
-
 	}
 	soc->disconnect();
 
