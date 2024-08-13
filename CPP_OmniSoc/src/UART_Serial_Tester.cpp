@@ -3,6 +3,8 @@
 #include <thread>
 #include "UART_Serial.h"
 
+//Note: on linux terminal command: ls /dev/ttyUSB* /dev/ttyACM*
+
 int period_ms = 1; //arbitrarily low test period.  havent tried sub ms
 bool killCommand = false;
 std::string killInput = "x";
