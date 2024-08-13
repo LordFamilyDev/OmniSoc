@@ -10,7 +10,7 @@ std::string killInput = "x";
 std::atomic<bool> inputAvailable(false);
 std::string threadedInput;
 
-void inputThread()
+void inputThread_doWork()
 {
 	while (!killCommand)
 	{
@@ -46,7 +46,7 @@ int main() {
 	serial1->connect();
 
 
-	std::thread inputThread(inputThread);
+	std::thread inputThread(inputThread_doWork);
 	while (!killCommand)
 	{
 		std::this_thread::sleep_for(std::chrono::milliseconds(period_ms));//this is optional, but keeps this thread from being a busy thread
