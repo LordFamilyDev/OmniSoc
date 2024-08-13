@@ -10,7 +10,7 @@ std::string killInput = "x";
 std::atomic<bool> inputAvailable(false);
 std::string threadedInput;
 
-void inputThread()
+void inputThread_doWork()
 {
 	while (!killCommand)
 	{
@@ -69,7 +69,7 @@ int main() {
 	//std::cout << "socket connected" << std::endl;
 
 	
-	std::thread inputThread(inputThread);
+	std::thread inputThread(inputThread_doWork);
 	while (!killCommand)
 	{
 		if (!asyncFlag) 
