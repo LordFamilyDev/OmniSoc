@@ -56,7 +56,7 @@ public:
     static std::vector<std::string> splitMessage(const std::string& message, const std::string& delimiter, std::string& remainder);
 
     bool suppressCatchPrints = true;
-    int missedHeartbeatLimit = 5;
+    int missedHeartbeatLimit = 50;
 
 private:
     void connectionThread();

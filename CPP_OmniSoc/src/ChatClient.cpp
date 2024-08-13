@@ -52,7 +52,7 @@ int main() {
 	}
 	else if (userInput == 's' || userInput == 'S') {
 		isServer = true;
-		ip = "127.0.0.1";
+		ip = "0.0.0.0";
 		std::cout << "enter Port" << std::endl;
 		std::cin >> port;
 	}
