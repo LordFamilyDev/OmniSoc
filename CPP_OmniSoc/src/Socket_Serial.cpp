@@ -154,6 +154,7 @@ void Socket_Serial::doConnection()
             if (socket_.is_open()) {
                 socket_.non_blocking(true);
                 std::cout << "socket connected" << std::endl;
+                missedHeartbeats = -5; //slight grace period for initial connection.
                 connectedFlag = true;
             }
         }
@@ -175,28 +176,31 @@ void Socket_Serial::closeSocket()
     {
         std::cout << "Connection Dropped" << std::endl;
     }
-    if (socket_.is_open()) {
-        boost::system::error_code ec;
-        socket_.shutdown(boost::asio::ip::tcp::socket::shutdown_both, ec);
-        if (ec && ec != boost::asio::error::not_connected) {
-            std::cerr << "Failed to shutdown socket: " << ec.message() << std::endl;
-        }
-        socket_.close(ec);
-        if (ec) {
-            std::cerr << "Failed to close socket: " << ec.message() << std::endl;
-        }
-    }
-    
-    try
-    {
-        if (!autoReconnect && acceptor_ != nullptr && acceptor_->is_open())
-        {
-            acceptor_->close();
-        }
-    }
-    catch (...) {}
-    
 
+    boost::system::error_code ec;
+
+    socket_.shutdown(boost::asio::ip::tcp::socket::shutdown_both, ec);
+    if (ec && !suppressCatchPrints) {
+        std::cerr << "Failed to shutdown socket: " << ec.message() << std::endl;
+    }
+    socket_.close(ec);
+    if (ec && !suppressCatchPrints) {
+        std::cerr << "Failed to close socket: " << ec.message() << std::endl;
+    }
+    socket_.release(ec);
+    if (ec && !suppressCatchPrints) {
+        std::cerr << "Failed to release socket: " << ec.message() << std::endl;
+    }
+    
+    acceptor_->close(ec);
+    if (ec && !suppressCatchPrints) {
+        std::cerr << "Failed to close acceptor: " << ec.message() << std::endl;
+    }
+
+    acceptor_->release(ec);
+    if (ec && !suppressCatchPrints) {
+        std::cerr << "Failed to release acceptor: " << ec.message() << std::endl;
+    }
 
     connectedFlag = false;
 }
