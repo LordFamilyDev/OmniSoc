@@ -8,18 +8,20 @@ set(CMAKE_CXX_STANDARD 14)
 # Find Boost
 find_package(Boost REQUIRED)
 
+include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
+
 # Create a static library
-add_library(OmniSoc STATIC UART_Serial.cpp BLE_Serial.cpp Socket_Serial.cpp)
+add_library(OmniSoc STATIC src/UART_Serial.cpp src/BLE_Serial.cpp src/Socket_Serial.cpp)
 
 # Include Boost directories
 target_include_directories(OmniSoc PUBLIC ${Boost_INCLUDE_DIRS})
 
 # Add executable for ChatClient and link against OmniSoc
-add_executable(ChatClient ChatClient.cpp)
+add_executable(ChatClient src/ChatClient.cpp)
 target_link_libraries(ChatClient PRIVATE OmniSoc)
 
 # Add executable for UART_Serial_Tester and link against OmniSoc
-add_executable(UART_Serial_Tester UART_Serial_Tester.cpp)
+add_executable(UART_Serial_Tester src/UART_Serial_Tester.cpp)
 target_link_libraries(UART_Serial_Tester PRIVATE OmniSoc)
 
 # Find and link Threads library (cross-platform)
