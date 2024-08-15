@@ -15,6 +15,7 @@ add_library(OmniSoc STATIC src/UART_Serial.cpp src/BLE_Serial.cpp src/Socket_Ser
 
 # Include Boost directories
 target_include_directories(OmniSoc PUBLIC ${Boost_INCLUDE_DIRS})
+target_link_libraries(OmniSoc PUBLIC ${Boost_LIBRARIES})
 
 # Add executable for ChatClient and link against OmniSoc
 add_executable(ChatClient src/ChatClient.cpp)
