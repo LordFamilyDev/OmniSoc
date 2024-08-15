@@ -116,7 +116,7 @@ int UART_Serial::receiveMessage(int& header, std::vector<float>& data) {
         lastHeader = (headerBytes[0] << 8) | headerBytes[1];
         lastNumFloats = headerBytes[2];
         buffer_.erase(buffer_.begin(), buffer_.begin() + HEADER_SIZE + 1);
-        std::cout << "last header:" << lastHeader <<" , num floats:"<<lastNumFloats<< std::endl;
+        //std::cout << "last header:" << lastHeader <<" , num floats:"<<lastNumFloats<< std::endl;
 
         if (lastNumFloats > maxFloats)
         {
@@ -158,7 +158,7 @@ int UART_Serial::receiveMessage(int& header, std::vector<float>& data) {
     lastNumFloats = 0;
 
     uint8_t checksum = computeChecksum(message.data(), messageSize - CHECKSUM_SIZE);
-    std::cout << "checksum: " << checksum << " ; " << message[messageSize - 1] << std::endl;
+    //std::cout << "checksum: " << checksum << " ; " << message[messageSize - 1] << std::endl;
     if (checksum != message[messageSize - 1]) {
         setSeekingFlag();
         return -3;
