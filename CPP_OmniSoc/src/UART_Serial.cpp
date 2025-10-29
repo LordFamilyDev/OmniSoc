@@ -1,7 +1,7 @@
 #include "UART_Serial.h"
 
 UART_Serial::UART_Serial(const std::string& port, unsigned int baud_rate, int timeoutPeriod_ms)
-    : serial_(io_service_), port_(port), baud_rate_(baud_rate), timeoutPeriod_ms_(timeoutPeriod_ms), running_(false) {}
+    : serial_(io_context_), port_(port), baud_rate_(baud_rate), timeoutPeriod_ms_(timeoutPeriod_ms), running_(false) {}
 
 UART_Serial::~UART_Serial() {
     disconnect();

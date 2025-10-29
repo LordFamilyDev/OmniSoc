@@ -21,6 +21,10 @@
 - create benchmark/ stress testing app
 - test cross system
 
+# Building
+- Use cmake to build
+- Depends on Boost asio
+
 
 # MISC
 

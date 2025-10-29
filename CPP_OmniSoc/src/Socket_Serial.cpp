@@ -4,7 +4,7 @@
 #include <iostream>
 
 Socket_Serial::Socket_Serial(const std::string& _IP_Address, const std::string& _port, bool _isServer, bool _asyncronousFlag)
-    : io_service_(), socket_(io_service_) {
+    : io_context_(), socket_(io_context_) {
     
     asyncronousFlag = _asyncronousFlag;
     IP_Address = _IP_Address;
@@ -138,17 +138,18 @@ void Socket_Serial::doConnection()
     try {
         if (!connectedFlag) {
 
-            boost::asio::ip::tcp::resolver resolver(io_service_);
-            boost::asio::ip::tcp::resolver::query query(boost::asio::ip::tcp::v4(), IP_Address, port);
-            boost::asio::ip::tcp::resolver::iterator endpoint_iterator = resolver.resolve(query);
+            boost::asio::ip::tcp::resolver resolver(io_context_);
+            //boost::asio::ip::tcp::resolver::query query(boost::asio::ip::tcp::v4(), IP_Address, port);
+            //boost::asio::ip::tcp::resolver::iterator endpoint_iterator = resolver.resolve(query);
+            auto endpoints = resolver.resolve(IP_Address, port);
 
             if (isServer) {
-                acceptor_ = std::make_shared < boost::asio::ip::tcp::acceptor>(io_service_, *endpoint_iterator);
+                acceptor_ = std::make_shared < boost::asio::ip::tcp::acceptor>(io_context_, *endpoints.begin());
                 bool acceptError = false;
                 acceptor_->accept(socket_);
             }
             else {
-                boost::asio::connect(socket_, endpoint_iterator);
+                boost::asio::connect(socket_, endpoints);
             }
 
             if (socket_.is_open()) {

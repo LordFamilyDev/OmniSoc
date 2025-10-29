@@ -41,7 +41,7 @@ private:
         asyncFlushClock = std::chrono::steady_clock::now();
     }
 
-    boost::asio::io_service io_service_;
+    boost::asio::io_context io_context_;
     boost::asio::serial_port serial_;
     std::string port_;
     unsigned int baud_rate_;
