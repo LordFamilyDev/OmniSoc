@@ -25,6 +25,11 @@
 - Use cmake to build
 - Depends on Boost asio
 
+# Installation (Linux)
+- [optional] cmake -DCMAKE_INSTALL_PREFIX=$HOME/local ..
+- make
+- [sudo] make install
+
 
 # MISC
 
