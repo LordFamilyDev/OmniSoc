@@ -1,0 +1,22 @@
+{
+  "name": "com.halfstack.socketserial",
+  "version": "1.0.0",
+  "displayName": "Socket Serial",
+  "description": "TCP/IP socket communication library for Unity. Supports client/server modes with asynchronous or synchronous operation, auto-reconnect, and heartbeat detection.",
+  "unity": "2019.4",
+  "keywords": [
+    "networking",
+    "tcp",
+    "socket",
+    "serial",
+    "communication",
+    "client",
+    "server"
+  ],
+  "author": {
+    "name": "Half Stack Solutions",
+    "email": "contact@halfstacksolutions.com",
+    "url": "https://halfstacksolutions.com"
+  },
+  "category": "Networking"
+}
