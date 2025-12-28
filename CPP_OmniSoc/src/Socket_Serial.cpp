@@ -271,7 +271,7 @@ void Socket_Serial::readMessages() {
             if (bytes_read > 0) {
                 std::string message(buffer, bytes_read);
                 std::string tempRemainder;
-                std::vector<std::string> msgs = splitMessage(message, msgDelimiter, tempRemainder);
+                std::vector<std::string> msgs = splitMessage(message, msgDelimiter, tempRemainder, false);
                 for (int i = 0; i < msgs.size(); i++)
                 {
                     std::string isolatedMessage = "";
@@ -305,7 +305,7 @@ void Socket_Serial::readMessages() {
     }
 }
 
-std::vector<std::string> Socket_Serial::splitMessage(const std::string& message, const std::string& delimiter) {
+std::vector<std::string> Socket_Serial::splitMessage(const std::string& message, const std::string& delimiter, std::string& remainder,bool appendRemainder ) {
     std::string inMsg = message;
     std::vector<std::string> messages;
     size_t pos = 0;
@@ -318,7 +318,8 @@ std::vector<std::string> Socket_Serial::splitMessage(const std::string& message,
     }
 
     if (!inMsg.empty()) {
-        messages.push_back(inMsg);
+        remainder = inMsg;
+        if(appendRemainder){messages.push_back(inMsg);}
     }
 
     return messages;
