@@ -305,7 +305,7 @@ void Socket_Serial::readMessages() {
     }
 }
 
-std::vector<std::string> Socket_Serial::splitMessage(const std::string& message, const std::string& delimiter, std::string& remainder) {
+std::vector<std::string> Socket_Serial::splitMessage(const std::string& message, const std::string& delimiter) {
     std::string inMsg = message;
     std::vector<std::string> messages;
     size_t pos = 0;
@@ -318,7 +318,7 @@ std::vector<std::string> Socket_Serial::splitMessage(const std::string& message,
     }
 
     if (!inMsg.empty()) {
-        remainder = inMsg;
+        messages.push_back(inMsg);
     }
 
     return messages;
