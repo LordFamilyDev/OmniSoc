@@ -1,103 +1,199 @@
 #include <iostream>
-#include <chrono>
+#include <sstream>
+#include <string>
+#include <vector>
 #include <thread>
+#include <mutex>
+#include <atomic>
+#include <chrono>
 #include "UART_Serial.h"
 
-//Note: on linux terminal command: ls /dev/ttyUSB* /dev/ttyACM*
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <glob.h>
+#endif
 
-int period_ms = 1; //arbitrarily low test period.  havent tried sub ms
-bool killCommand = false;
-std::string killInput = "x";
+// ── Port discovery ────────────────────────────────────────────────────────────
 
-std::atomic<bool> inputAvailable(false);
-std::string threadedInput;
-
-void inputThread_doWork()
+std::vector<std::string> listPorts()
 {
-	while (!killCommand)
-	{
-		std::string input;
-		std::getline(std::cin, input);
-		threadedInput = input;
-		if (input == killInput)
-		{ killCommand = true; }
-		inputAvailable = true;
-	}
+    std::vector<std::string> ports;
+#ifdef _WIN32
+    for (int i = 1; i <= 256; ++i)
+    {
+        std::string name = "COM" + std::to_string(i);
+        HANDLE h = CreateFileA(("\\\\.\\" + name).c_str(),
+                               GENERIC_READ | GENERIC_WRITE, 0, nullptr,
+                               OPEN_EXISTING, 0, nullptr);
+        if (h != INVALID_HANDLE_VALUE) { ports.push_back(name); CloseHandle(h); }
+    }
+#else
+    const char* patterns[] = { "/dev/ttyUSB*", "/dev/ttyACM*" };
+    for (const char* pattern : patterns)
+    {
+        glob_t g;
+        if (glob(pattern, GLOB_NOSORT, nullptr, &g) == 0)
+        {
+            for (size_t i = 0; i < g.gl_pathc; ++i)
+                ports.push_back(g.gl_pathv[i]);
+            globfree(&g);
+        }
+    }
+#endif
+    return ports;
 }
 
+// ── Background receive thread ─────────────────────────────────────────────────
 
-int main() {
+struct ReceivedMsg
+{
+    int header = -1;
+    std::vector<float> data;
+    bool fresh = false; // true if not yet displayed
+};
 
-	//input timeout
-	std::chrono::milliseconds timeout(period_ms);
+std::mutex            recvMutex;
+ReceivedMsg           latestMsg;
+std::atomic<bool>     killCommand(false);
 
-	std::cout << "Omni Soc uart tester." << std::endl;
-	std::cout << "x after initial selections to terminate" << std::endl;
+void receiveThread_doWork(std::shared_ptr<UART_Serial> serial)
+{
+    while (!killCommand)
+    {
+        int header = 0;
+        std::vector<float> data;
+        if (serial->receiveMessage(header, data) == 1)
+        {
+            std::lock_guard<std::mutex> lock(recvMutex);
+            latestMsg = { header, data, true };
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+}
 
-	std::string port;
-	std::cout << "choose port:" << std::endl;
-	std::cin >> port;
+// ── Input parsing ─────────────────────────────────────────────────────────────
+// Expected format: <header_int>,<float>,<float>,...   e.g.  7,1.0,2.5,3.0
 
-	int baudRate = 57600;
-	int timeout_ms = 1000;
+bool parseInput(const std::string& line, int& header, std::vector<float>& floats)
+{
+    std::istringstream ss(line);
+    std::string token;
+    std::vector<std::string> tokens;
 
+    while (std::getline(ss, token, ','))
+    {
+        size_t start = token.find_first_not_of(" \t");
+        size_t end   = token.find_last_not_of(" \t");
+        if (start != std::string::npos)
+            tokens.push_back(token.substr(start, end - start + 1));
+    }
 
-	auto serial1 = std::make_shared < UART_Serial>(port, baudRate, timeout_ms);
-	std::cout << "uart initialized" << std::endl;
+    if (tokens.empty()) return false;
 
-	serial1->connect();
+    try
+    {
+        header = std::stoi(tokens[0]);
+        floats.clear();
+        for (size_t i = 1; i < tokens.size(); ++i)
+            floats.push_back(std::stof(tokens[i]));
+    }
+    catch (...) { return false; }
 
+    if (floats.size() > static_cast<size_t>(UART_Serial::maxFloats)) return false;
 
-	std::thread inputThread(inputThread_doWork);
-	while (!killCommand)
-	{
-		std::this_thread::sleep_for(std::chrono::milliseconds(period_ms));//this is optional, but keeps this thread from being a busy thread
+    return true;
+}
 
+// ── Main ──────────────────────────────────────────────────────────────────────
 
-		std::string outMessage = "";
+int main()
+{
+    std::cout << "OmniSoc UART Tester  |  'x' to exit\n\n";
 
-		if (inputAvailable.exchange(false))
-		{
-			outMessage = threadedInput;
-		}
+    // List available ports
+    auto ports = listPorts();
+    if (ports.empty())
+    {
+        std::cout << "No serial ports detected.\n";
+    }
+    else
+    {
+        std::cout << "Available ports:\n";
+        for (auto& p : ports) std::cout << "  " << p << "\n";
+    }
 
-		if (outMessage.size() > 0 && serial1->isConnected()) //technically connected check is optional due to buffers, but its bad practice to pack the buffers while socket is disconnected
-		{
-			//todo: need to convert outMessage string into meaningful uart message (header and floats)
-			int arbHeader = 7;
-			std::vector<float> arbData = std::vector<float>();
-			arbData.push_back(5.123);
-			arbData.push_back(1);
-			arbData.push_back(2);
-			arbData.push_back(5.5);
-			serial1->sendMessage(arbHeader, arbData);
-		}
+    std::cout << "\nChoose port: ";
+    std::string port;
+    std::cin >> port;
+    std::cin.ignore();
 
+    int baudRate   = 57600;
+    int timeout_ms = 1000;
 
-		int header = 0;
-		std::vector<float> data = std::vector<float>();
-		int result = serial1->receiveMessage(header, data);
-		if (result == 1)
-		{
-			std::cout << header << " : ";
-			for (int i = 0; i < data.size(); i++)
-			{
-				std::cout << data[i] << " , ";
-			}
-			std::cout << std::endl;
-		}
-		else
-		{
-			//std::cout << result << std::endl;
-		}
-	}
-	serial1->disconnect();
+    auto serial = std::make_shared<UART_Serial>(port, baudRate, timeout_ms);
+    serial->connect();
 
-	if (inputThread.joinable())
-	{
-		inputThread.join();
-	}
+    std::cout << "\nConnected. Input format: <header>,<float>,<float>,...\n"
+              << "Example: 7,1.0,2.5,3.0\n\n";
 
+    std::thread recvThread(receiveThread_doWork, serial);
 
-	return 0;
+    while (!killCommand)
+    {
+        std::cout << "> ";
+        std::string line;
+        std::getline(std::cin, line);
+
+        if (line == "x" || line == "X")
+        {
+            killCommand = true;
+            break;
+        }
+        if (line.empty()) continue;
+
+        int header;
+        std::vector<float> floats;
+        if (!parseInput(line, header, floats))
+        {
+            std::cout << "  [invalid] format: <header_int>,<float>,<float>,...\n";
+            continue;
+        }
+
+        if (!serial->isConnected())
+        {
+            std::cout << "  [not connected]\n";
+            continue;
+        }
+
+        serial->sendMessage(header, floats);
+
+        // Brief wait so a reply has a chance to arrive before we display
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+        // Display latest received message
+        ReceivedMsg msg;
+        {
+            std::lock_guard<std::mutex> lock(recvMutex);
+            msg = latestMsg;
+            latestMsg.fresh = false;
+        }
+
+        if (msg.header < 0)
+        {
+            std::cout << "  << (nothing received yet)\n";
+        }
+        else
+        {
+            std::cout << "  << " << msg.header;
+            for (float f : msg.data) std::cout << ", " << f;
+            if (!msg.fresh) std::cout << "  [stale]";
+            std::cout << "\n";
+        }
+    }
+
+    serial->disconnect();
+    if (recvThread.joinable()) recvThread.join();
+
+    return 0;
 }
