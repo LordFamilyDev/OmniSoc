@@ -56,8 +56,8 @@ private:
     static constexpr int HEADER_SIZE = 2;
     static constexpr int CHECKSUM_SIZE = 1;
     static constexpr int FLOAT_SIZE = 4;
-    bool timeoutFlag = true;
-    bool seekingFlag = true;
+    std::atomic<bool> timeoutFlag{true};
+    std::atomic<bool> seekingFlag{true};
     std::chrono::steady_clock::time_point lastTimeoutClock;
 
     int lastHeader = -1;

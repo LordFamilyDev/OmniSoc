@@ -16,6 +16,7 @@ void UART_Serial::connect() {
     }
     serial_.set_option(boost::asio::serial_port_base::baud_rate(baud_rate_));
     byteSpacingTime_us = static_cast<long>(ceil(10000000.0 / baud_rate_));
+    asyncFlushClock = std::chrono::steady_clock::now();
     timeoutFlag = false;
 
     startWorkThreads();
@@ -51,18 +52,12 @@ void UART_Serial::flushIncomingSerial() {
 }
 
 bool UART_Serial::asyncFlushIncomingSerial() {
-    
-    while (available() > 0) {
-        std::lock_guard<std::mutex> lock(buffer_mutex_); //releases on scope drop
+    std::lock_guard<std::mutex> lock(buffer_mutex_);
+    if (!buffer_.empty()) {
         buffer_.clear();
         asyncFlushClock = std::chrono::steady_clock::now();
     }
-    
-    if (std::chrono::steady_clock::now() - asyncFlushClock > std::chrono::microseconds(byteSpacingTime_us * 2)) {
-        return true;
-    }
-
-    return false;
+    return std::chrono::steady_clock::now() - asyncFlushClock > std::chrono::microseconds(byteSpacingTime_us * 2);
 }
 
 int UART_Serial::sendMessage(int header, const std::vector<float>& data) {
@@ -115,6 +110,7 @@ int UART_Serial::receiveMessage(int& header, std::vector<float>& data) {
         std::vector<uint8_t> headerBytes(buffer_.begin(), buffer_.begin() + HEADER_SIZE + 1);
         lastHeader = (headerBytes[0] << 8) | headerBytes[1];
         lastNumFloats = headerBytes[2];
+        header = lastHeader;
         buffer_.erase(buffer_.begin(), buffer_.begin() + HEADER_SIZE + 1);
         //std::cout << "last header:" << lastHeader <<" , num floats:"<<lastNumFloats<< std::endl;
 
@@ -131,15 +127,15 @@ int UART_Serial::receiveMessage(int& header, std::vector<float>& data) {
         header = lastHeader;
     }
 
-    int floatDataSize = lastNumFloats * FLOAT_SIZE + CHECKSUM_SIZE;
-    if (buffer_.size() < floatDataSize) {
+    int bodySize = lastNumFloats * FLOAT_SIZE + CHECKSUM_SIZE; // float data + checksum
+    if (buffer_.size() < bodySize) {
         return -2; //wait for complete message
     }
 
-    int messageSize = floatDataSize + HEADER_SIZE + 1;
+    int messageSize = bodySize + HEADER_SIZE + 1;
 
-    std::vector<uint8_t> message(buffer_.begin(), buffer_.begin() + floatDataSize);
-    buffer_.erase(buffer_.begin(), buffer_.begin() + floatDataSize);
+    std::vector<uint8_t> message(buffer_.begin(), buffer_.begin() + bodySize);
+    buffer_.erase(buffer_.begin(), buffer_.begin() + bodySize);
 
 
     data.resize(lastNumFloats);
@@ -147,12 +143,12 @@ int UART_Serial::receiveMessage(int& header, std::vector<float>& data) {
         data[i] = *reinterpret_cast<float*>(&message[i * FLOAT_SIZE]);
     }
 
-    //add message header to front of message for checksum
-    uint8_t headerByte1 = (uint8_t)(lastHeader & 0xFF);
-    uint8_t headerByte2 = (uint8_t)((lastHeader >> 8) & 0xFF);
+    //add message header to front of message for checksum (match sendMessage byte order: high, low, numFloats)
+    uint8_t highByte = (uint8_t)((lastHeader >> 8) & 0xFF);
+    uint8_t lowByte  = (uint8_t)(lastHeader & 0xFF);
     message.insert(message.begin(), (uint8_t)lastNumFloats);
-    message.insert(message.begin(), headerByte2);
-    message.insert(message.begin(), headerByte1);
+    message.insert(message.begin(), lowByte);
+    message.insert(message.begin(), highByte);
 
     lastHeader = -1;
     lastNumFloats = 0;

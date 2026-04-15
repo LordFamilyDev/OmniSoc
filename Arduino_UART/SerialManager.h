@@ -29,11 +29,12 @@ public:
     
     SerialManager(HardwareSerial& serialPort, int _timeoutPeriod_ms) : serial(&serialPort),timeoutPeriod_ms(_timeoutPeriod_ms)  {}
 
-    void connect(unsigned long baudRate) 
-    { 
+    void connect(unsigned long baudRate)
+    {
         byteSpacingTime_us = static_cast<long>(ceil(10000000.0 / baudRate));
         Serial.println(byteSpacingTime_us);
-        serial->begin(baudRate); 
+        asyncFlushClock = micros();
+        serial->begin(baudRate);
     }
     void disconnect() { serial->end(); }
     bool isConnected() { return !timeoutFlag; }
