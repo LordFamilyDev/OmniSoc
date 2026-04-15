@@ -36,7 +36,7 @@ OmniSoc is a cross-platform, cross-language serial communication library targeti
 
 **Alpha/Beta — actively developed, not yet production-stable.**
 
-- C++ UART and Socket implementations are the most mature (tested stable)
+- C++ UART and Socket implementations are the most mature; UART has been debugged and tested on Linux against Arduino UNO R4
 - Unity (C#) port was added recently and is still early
 - ROS2 integration is a working demo, not a polished package
 - BLE is a stub — no implementation exists yet
@@ -45,7 +45,7 @@ OmniSoc is a cross-platform, cross-language serial communication library targeti
 
 **Known TODOs / Limitations:**
 - BLE implementation is missing entirely
-- Arduino limited to 10 floats/message due to 64-byte hardware buffer
+- Arduino limited to 10 floats/message (set by `maxFloats`); AVR boards have a 64-byte RX hardware buffer which informed this limit, but it applies to all Arduino targets
 - No on-demand heartbeat (connection health only detectable when messaging regularly)
 - No protocol buffers or MessagePack support (noted as future enhancement)
 - Baud rate must be manually calculated to avoid overrun
@@ -73,16 +73,16 @@ OS / Hardware
 ```
 
 **Threading (C++ async mode):**
-- `connectionThread` — manages lifecycle, reconnection, heartbeat
-- `serialThread` — blocking read/write loop
-- Main thread — non-blocking, enqueues/dequeues messages
+- `sync_thread_` — manages seekingFlag / resync after corrupt messages
+- `read_thread_` — blocking read loop, feeds bytes into the internal buffer
+- Main thread / caller — calls `receiveMessage()` / `sendMessage()` directly
 
 **Sync mode** (Arduino, or debugging): caller drives updates via `synchronousUpdate()` / `handleSynchronization()` in the main loop.
 
 **UART Message Format:**
 ```
-[Header 0xAB 0xCD (2B)] [Float Count (1B)] [Float Data (N×4B)] [XOR Checksum (1B)]
-Max payload: 10 floats = 43 bytes/message
+[Header (2B, user-defined int)] [Float Count (1B)] [Float Data (N×4B)] [XOR Checksum (1B)]
+Max payload: 10 floats = 43 bytes/message (limit set by maxFloats constant, not hardware)
 ```
 
 **Socket Message Format:**
@@ -114,7 +114,7 @@ OmniSoc/
 │       ├── Socket_Serial.cpp        # Socket implementation
 │       ├── BLE_Serial.cpp           # BLE stub
 │       ├── ChatClient.cpp           # Interactive TCP demo app
-│       └── UART_Serial_Tester.cpp   # UART unit test utility
+│       └── UART_Serial_Tester.cpp   # Interactive UART tester: lists available ports, accepts header+floats input, displays latest received message
 
 ├── Arduino_UART/                    # Arduino C implementation
 │   ├── README.md
@@ -141,6 +141,17 @@ OmniSoc/
             ├── SocketSerialBehaviour.cs # MonoBehaviour wrapper
             └── SocketSerial.Runtime.asmdef
 ```
+
+---
+
+## Hardware Notes
+
+**Arduino UNO R4 (Renesas core)**
+- `Serial.availableForWrite()` always returns 0 — the Renesas core does not buffer outgoing data; writes are blocking per-character. Do not use `availableForWrite()` as a TX gate; call `write()` directly. This is a known limitation of ArduinoCore-renesas.
+- On Linux, opening the serial port toggles DTR which resets the R4. Allow ~2 seconds for the board to reboot before expecting communication.
+
+**Linux serial ports (Boost ASIO)**
+- Boost ASIO opens serial ports with `O_NONBLOCK` but does not clear `ICANON` (canonical/line mode). In canonical mode the kernel buffers binary data until a newline arrives, so no bytes are delivered to `read()`. If adding new platforms or seeing `buf:0` in diagnostics, ensure the port is configured for raw mode.
 
 ---
 
