@@ -15,8 +15,13 @@ void UART_Serial::connect() {
         return;
     }
     serial_.set_option(boost::asio::serial_port_base::baud_rate(baud_rate_));
+    serial_.set_option(boost::asio::serial_port_base::character_size(8));
+    serial_.set_option(boost::asio::serial_port_base::parity(boost::asio::serial_port_base::parity::none));
+    serial_.set_option(boost::asio::serial_port_base::stop_bits(boost::asio::serial_port_base::stop_bits::one));
+    serial_.set_option(boost::asio::serial_port_base::flow_control(boost::asio::serial_port_base::flow_control::none));
     byteSpacingTime_us = static_cast<long>(ceil(10000000.0 / baud_rate_));
     asyncFlushClock = std::chrono::steady_clock::now();
+    lastTimeoutClock = std::chrono::steady_clock::now();
     timeoutFlag = false;
 
     startWorkThreads();
@@ -94,7 +99,7 @@ int UART_Serial::sendMessage(int header, const std::vector<float>& data) {
 
 int UART_Serial::receiveMessage(int& header, std::vector<float>& data) {
     std::lock_guard<std::mutex> lock(buffer_mutex_);
-    if (!timeoutFlag && std::chrono::steady_clock::now() - lastTimeoutClock > std::chrono::milliseconds(timeoutPeriod_ms_)) {
+    if (!timeoutFlag && !seekingFlag && std::chrono::steady_clock::now() - lastTimeoutClock > std::chrono::milliseconds(timeoutPeriod_ms_)) {
         timeoutFlag = true;
     }
 
@@ -194,11 +199,18 @@ void UART_Serial::readFromSerial() {
 }
 
 void UART_Serial::handleSynchronization() {
-    //byteSpacingTime_us
     while (running_) {
         if (seekingFlag) {
             bool flushResult = asyncFlushIncomingSerial();
-            seekingFlag = !flushResult;
+            if (flushResult) {
+                // Reset timeout clock before clearing seekingFlag so receiveMessage()
+                // never sees seekingFlag=false with a stale lastTimeoutClock.
+                {
+                    std::lock_guard<std::mutex> lock(buffer_mutex_);
+                    lastTimeoutClock = std::chrono::steady_clock::now();
+                }
+                seekingFlag = false;
+            }
         }
         std::this_thread::sleep_for(std::chrono::microseconds(byteSpacingTime_us));
     }

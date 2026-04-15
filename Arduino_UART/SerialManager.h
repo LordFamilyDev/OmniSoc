@@ -32,8 +32,8 @@ public:
     void connect(unsigned long baudRate)
     {
         byteSpacingTime_us = static_cast<long>(ceil(10000000.0 / baudRate));
-        Serial.println(byteSpacingTime_us);
         asyncFlushClock = micros();
+        lastTimeoutClock = millis();
         serial->begin(baudRate);
     }
     void disconnect() { serial->end(); }

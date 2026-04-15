@@ -1,3 +1,8 @@
+#include "Arduino_LED_Matrix.h"   // Include the LED_Matrix library
+
+ArduinoLEDMatrix matrix;          // Create an instance of the ArduinoLEDMatrix class
+uint8_t frame[8][12] = {0};
+
 #include "SerialManager.h"
 
 //SerialManager omniSoc(Serial,20);
@@ -13,10 +18,21 @@ bool ledOnFlag = false;
 
 float data[5] = {0,0,0,0,0}; //needs to be as biggest message to be received
 
+void debugOn() {
+    frame[0][0] = 1;
+    matrix.renderBitmap(frame, 8, 12);
+}
+
+void debugOff() {
+    frame[0][0] = 0;
+    matrix.renderBitmap(frame, 8, 12);
+}
+
 void setup() {
   //Serial.begin(115200); //for debugging arduino to arduino coms with a mega
   omniSoc.connect(57600);
-  pinMode(13,OUTPUT);
+  matrix.begin(); 
+  debugOn();
 }
 
 void loop() {
@@ -30,29 +46,22 @@ void loop() {
     int receiveCode = omniSoc.receiveMessage(header,data,numFloats);
     if(receiveCode == 1) //new message
     {
-      /*
-        //arduino-arduino testing
-        //print message to computer serial
-        {
-          Serial.print(header);
-          Serial.print(",");
-          Serial.print(numFloats);
-          Serial.print(",");
-          for(int i = 0;i<numFloats;i++)
-          {
-            Serial.print(data[i]);
-            Serial.print(",");
-          }
-          Serial.println();
-        }
-      */
+      ledOnFlag = !ledOnFlag;
+      if(ledOnFlag)
+      {
+        debugOn();
+      }
+      else
+      {
+        debugOff();
+      }
+
 
       //omnisoc testing
       //modify and reflect message
       {
         header+=1;
         omniSoc.sendMessage(header,data,numFloats);
-        ledOnFlag = !ledOnFlag;
       }
     }
   }
@@ -82,16 +91,5 @@ void loop() {
     int numFloats = 1;
     //send arbitrary data
     int result = omniSoc.sendMessage(header,tempData,numFloats);
-  }
-
-  //monitor connection and display connection status on pin 13
-  //if(omniSoc.isConnected())
-  if(ledOnFlag)
-  {
-    digitalWrite(13,LOW);
-  }
-  else
-  {
-    digitalWrite(13,HIGH);
   }
 }

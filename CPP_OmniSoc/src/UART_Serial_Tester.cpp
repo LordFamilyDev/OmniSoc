@@ -161,10 +161,7 @@ int main()
         }
 
         if (!serial->isConnected())
-        {
-            std::cout << "  [not connected]\n";
-            continue;
-        }
+            std::cout << "  [not yet connected — sending anyway]\n";
 
         serial->sendMessage(header, floats);
 
