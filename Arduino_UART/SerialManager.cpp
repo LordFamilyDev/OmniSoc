@@ -51,9 +51,6 @@ int SerialManager::sendMessage(int header, float* data, int numFloats)
     uint8_t checksum = computeChecksum(message, messageSize - CHECKSUM_SIZE);
     message[messageSize - 1] = checksum;
 
-    int bytesAvail = serial->availableForWrite();
-    if(bytesAvail < messageSize) 
-    { return -1; }
     serial->write(message, messageSize);
 
     return 1;
