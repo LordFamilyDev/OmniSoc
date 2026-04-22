@@ -1,5 +1,10 @@
 #include "UART_Serial.h"
 
+#if defined(__unix__) || defined(__APPLE__)
+#  include <termios.h>
+#  include <unistd.h>
+#endif
+
 UART_Serial::UART_Serial(const std::string& port, unsigned int baud_rate, int timeoutPeriod_ms)
     : serial_(io_context_), port_(port), baud_rate_(baud_rate), timeoutPeriod_ms_(timeoutPeriod_ms), running_(false) {}
 
@@ -19,6 +24,24 @@ void UART_Serial::connect() {
     serial_.set_option(boost::asio::serial_port_base::parity(boost::asio::serial_port_base::parity::none));
     serial_.set_option(boost::asio::serial_port_base::stop_bits(boost::asio::serial_port_base::stop_bits::one));
     serial_.set_option(boost::asio::serial_port_base::flow_control(boost::asio::serial_port_base::flow_control::none));
+
+#if defined(__unix__) || defined(__APPLE__)
+    // Put the TTY in raw mode. Boost ASIO's flow_control::none only clears
+    // hardware RTS/CTS; it leaves ICANON (line buffering) and IXON/IXOFF
+    // (software flow control) at the kernel default, which is typically ON.
+    // With IXON on, binary bytes that happen to equal XOFF (0x13) silently
+    // stall writes until an XON (0x11) byte arrives — deadlocking sendMessage()
+    // under sustained traffic. With ICANON on, the kernel withholds bytes
+    // from read() until a newline arrives. cfmakeraw() disables both plus
+    // signal chars, echo, and output post-processing.
+    int fd = serial_.native_handle();
+    termios tio{};
+    if (tcgetattr(fd, &tio) == 0) {
+        cfmakeraw(&tio);
+        tcsetattr(fd, TCSANOW, &tio);
+    }
+#endif
+
     byteSpacingTime_us = static_cast<long>(ceil(10000000.0 / baud_rate_));
     asyncFlushClock = std::chrono::steady_clock::now();
     lastTimeoutClock = std::chrono::steady_clock::now();
@@ -29,11 +52,19 @@ void UART_Serial::connect() {
 
 void UART_Serial::disconnect() {
     timeoutFlag = true;
-    serial_.cancel();
-    stopWorkThreads();
+    running_ = false;
+
+    // Close the fd first so any thread blocked inside serial_.read_some()
+    // unblocks with an error and can observe running_=false. Without this
+    // the read thread stays parked in a kernel read() forever and
+    // stopWorkThreads() -> join() deadlocks, leaving a zombie process.
+    boost::system::error_code ec;
     if (serial_.is_open()) {
-        serial_.close();
+        serial_.cancel(ec);
+        serial_.close(ec);
     }
+
+    stopWorkThreads();
 }
 
 bool UART_Serial::isConnected() {
@@ -186,6 +217,9 @@ void UART_Serial::readFromSerial() {
 
         if (ec && ec != boost::asio::error::would_block) {
             std::cerr << "Error reading from serial port: " << ec.message() << std::endl;
+            // Back off after a persistent error (e.g. device disappeared,
+            // repeated EOF) so we don't burn a core and flood stderr.
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
             continue;
         }
 
