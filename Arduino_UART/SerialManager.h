@@ -13,20 +13,21 @@ private:
     long lastTimeoutClock = 0;
     long timeoutPeriod_ms;
 
-    int lastHeader = -1;
-    int lastNumFloats = 0;
-
     long asyncFlushClock = 0;
 
     long byteSpacingTime_us = -1;
 
-    
+    // Internal accumulation buffer for byte-by-byte resync on parse failure.
+    // Holds 2+ max-size frames (max frame = HEADER_SIZE + 1 + maxFloats*FLOAT_SIZE + CHECKSUM_SIZE = 44 B).
+    static const int RX_BUF_SIZE = 128;
+    uint8_t rxBuf[RX_BUF_SIZE];
+    int rxBufLen = 0;
 
 public:
 
     //arduino has a max serial buffer size of 64 bytes (technically this could be 14 bytes)
     static const int maxFloats = 10;
-    
+
     SerialManager(HardwareSerial& serialPort, int _timeoutPeriod_ms) : serial(&serialPort),timeoutPeriod_ms(_timeoutPeriod_ms)  {}
 
     void connect(unsigned long baudRate)
