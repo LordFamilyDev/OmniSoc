@@ -1,10 +1,6 @@
 #include "UART_Serial.h"
 
-#include <cerrno>
-#include <cstring>
-
 #if defined(__unix__) || defined(__APPLE__)
-#  include <poll.h>
 #  include <termios.h>
 #  include <unistd.h>
 #endif
@@ -215,39 +211,6 @@ uint8_t UART_Serial::computeChecksum(const uint8_t* data, int size) {
 
 void UART_Serial::readFromSerial() {
     while (running_) {
-#if defined(__unix__) || defined(__APPLE__)
-        // Bounded-wait poll() before read_some() so the loop iterates at least
-        // every 100 ms regardless of data availability. Without this, a
-        // synchronous read_some() can block in the kernel forever when no
-        // bytes arrive — which deadlocks disconnect()->stopWorkThreads()
-        // because join() can't wait for a thread that's parked in poll() and
-        // doesn't reliably wake on cancel()/close() (POSIX UB territory).
-        //
-        // The 100 ms cap matches the worst-case shutdown latency we're
-        // willing to accept. Throughput for actual data is unchanged: as
-        // soon as 1+ bytes arrive, poll() returns and read_some() pulls them
-        // immediately; this only adds latency to the no-data case.
-        struct pollfd pfd{};
-        pfd.fd     = serial_.native_handle();
-        pfd.events = POLLIN;
-        int pr = ::poll(&pfd, 1, 100);
-        if (pr == 0) {
-            continue;  // timeout, no data — re-check running_
-        }
-        if (pr < 0) {
-            if (errno == EINTR) continue;
-            std::cerr << "poll() on serial port failed: " << std::strerror(errno) << std::endl;
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
-            continue;
-        }
-        if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) {
-            // Device went away — bail out so stopWorkThreads() can join us.
-            // running_ stays unchanged; disconnect() is the one that flips it.
-            std::cerr << "serial port hung up (revents=0x"
-                      << std::hex << pfd.revents << std::dec << ")\n";
-            break;
-        }
-#endif
         char temp[1024];
         boost::system::error_code ec;
         std::size_t bytes_read = serial_.read_some(boost::asio::buffer(temp), ec);
@@ -260,17 +223,10 @@ void UART_Serial::readFromSerial() {
             continue;
         }
 
-        // KEEP the lock held across the inter-iteration sleep_for, the same
-        // way the upstream code did. The handleSynchronization() thread's
-        // asyncFlushIncomingSerial() relies on this — if the lock is released
-        // during the sleep, handleSync wakes between every read+insert and
-        // CLEARS the buffer (because seekingFlag starts true), which fights
-        // with read_thread's inserts and starves receiveMessage of complete
-        // frames. Symptom when broken: PT_Forwarder UART rx rate dropped from
-        // ~50 Hz to ~0.6 Hz. Verified 2026-05-02.
         std::lock_guard<std::mutex> lock(buffer_mutex_);
         buffer_.insert(buffer_.end(), temp, temp + bytes_read);
         //TODO: this could technically overfill if read is not being called...
+
 
         std::this_thread::sleep_for(std::chrono::microseconds(5 * byteSpacingTime_us));//this is kinda arbitrary (could be specified)
     }
