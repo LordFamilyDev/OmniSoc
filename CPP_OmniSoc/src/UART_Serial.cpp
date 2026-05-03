@@ -260,11 +260,17 @@ void UART_Serial::readFromSerial() {
             continue;
         }
 
-        {
-            std::lock_guard<std::mutex> lock(buffer_mutex_);
-            buffer_.insert(buffer_.end(), temp, temp + bytes_read);
-            //TODO: this could technically overfill if read is not being called...
-        }
+        // KEEP the lock held across the inter-iteration sleep_for, the same
+        // way the upstream code did. The handleSynchronization() thread's
+        // asyncFlushIncomingSerial() relies on this — if the lock is released
+        // during the sleep, handleSync wakes between every read+insert and
+        // CLEARS the buffer (because seekingFlag starts true), which fights
+        // with read_thread's inserts and starves receiveMessage of complete
+        // frames. Symptom when broken: PT_Forwarder UART rx rate dropped from
+        // ~50 Hz to ~0.6 Hz. Verified 2026-05-02.
+        std::lock_guard<std::mutex> lock(buffer_mutex_);
+        buffer_.insert(buffer_.end(), temp, temp + bytes_read);
+        //TODO: this could technically overfill if read is not being called...
 
         std::this_thread::sleep_for(std::chrono::microseconds(5 * byteSpacingTime_us));//this is kinda arbitrary (could be specified)
     }
