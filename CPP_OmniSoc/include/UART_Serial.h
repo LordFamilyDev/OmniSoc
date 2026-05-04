@@ -53,21 +53,25 @@ private:
     std::thread read_thread_;
     std::thread sync_thread_;
 
+    // OmniSoc UART framing v2: see OmniSoc/Arduino_UART/SerialManager.h for
+    // the canonical wire-format spec. Identical bytes on both sides.
+    static constexpr uint8_t SYNC_0 = 0xA5;
+    static constexpr uint8_t SYNC_1 = 0x5A;
+    static constexpr int SYNC_SIZE = 2;
     static constexpr int HEADER_SIZE = 2;
-    static constexpr int CHECKSUM_SIZE = 1;
+    static constexpr int CRC_SIZE = 2;
     static constexpr int FLOAT_SIZE = 4;
     std::atomic<bool> timeoutFlag{true};
     std::atomic<bool> seekingFlag{true};
     std::chrono::steady_clock::time_point lastTimeoutClock;
 
-    int lastHeader = -1;
-    int lastNumFloats = 0;
-
     std::chrono::steady_clock::time_point asyncFlushClock;
 
     long byteSpacingTime_us = -1;
 
-    uint8_t computeChecksum(const uint8_t* data, int size);
+    // CRC-16/CCITT-FALSE — poly 0x1021, init 0xFFFF, no reflection, no xorout.
+    // crc16_ccitt("123456789", 9) == 0x29B1.
+    static uint16_t crc16_ccitt(const uint8_t* data, int len);
 };
 
 #endif // UART_SERIAL_H

@@ -29,32 +29,35 @@ bool SerialManager::asyncFlushIncomingSerial()
     return false;
 }
 
-int SerialManager::sendMessage(int header, float* data, int numFloats) 
+int SerialManager::sendMessage(int header, float* data, int numFloats)
 {
-    uint8_t messageSize = HEADER_SIZE + 1 + numFloats * FLOAT_SIZE + CHECKSUM_SIZE;
+    uint8_t messageSize = SYNC_SIZE + HEADER_SIZE + 1 + numFloats * FLOAT_SIZE + CRC_SIZE;
     uint8_t message[messageSize];
 
-    // Add header to the message
-    message[0] = (header >> 8) & 0xFF;
-    message[1] = header & 0xFF;
+    // Sync bytes (advisory pre-filter for the receiver — not in the CRC).
+    message[0] = SYNC_0;
+    message[1] = SYNC_1;
 
-    // Add number of floats to the message
-    message[2] = numFloats;
+    // Header (big-endian).
+    message[SYNC_SIZE + 0] = (header >> 8) & 0xFF;
+    message[SYNC_SIZE + 1] = header & 0xFF;
 
-    // Add float data to the message
+    // numFloats.
+    message[SYNC_SIZE + HEADER_SIZE] = numFloats;
+
+    // Float payload.
     for (int i = 0; i < numFloats; i++) {
-        uint8_t* floatBytes = reinterpret_cast<uint8_t*>(&data[i]);
-        for (int j = 0; j < FLOAT_SIZE; j++) {
-            message[HEADER_SIZE + 1 + i * FLOAT_SIZE + j] = floatBytes[j];
-        }
+        memcpy(&message[SYNC_SIZE + HEADER_SIZE + 1 + i * FLOAT_SIZE],
+               &data[i], FLOAT_SIZE);
     }
 
-    // Compute and add checksum to the message
-    uint8_t checksum = computeChecksum(message, messageSize - CHECKSUM_SIZE);
-    message[messageSize - 1] = checksum;
+    // CRC-16 over [hdr_hi, hdr_lo, numFloats, float_bytes] — sync excluded.
+    uint16_t crc = crc16_ccitt(&message[SYNC_SIZE],
+                               HEADER_SIZE + 1 + numFloats * FLOAT_SIZE);
+    message[messageSize - 2] = (uint8_t)(crc & 0xFF);          // little-endian
+    message[messageSize - 1] = (uint8_t)((crc >> 8) & 0xFF);
 
     serial->write(message, messageSize);
-
     return 1;
 }
 
@@ -65,7 +68,7 @@ int SerialManager::receiveMessage(int& header, float* data, int& numFloats)
         millis() - lastTimeoutClock > timeoutPeriod_ms)
     { timeoutFlag = true; }
 
-    // Startup / manual-flush resync still uses the quiet-gap detector in
+    // Startup / manual-flush resync uses the quiet-gap detector in
     // handleSynchronization(). During that window, don't touch the stream.
     if (seekingFlag) { return -5; }
 
@@ -73,47 +76,84 @@ int SerialManager::receiveMessage(int& header, float* data, int& numFloats)
     while (serial->available() > 0 && rxBufLen < RX_BUF_SIZE)
     { rxBuf[rxBufLen++] = (uint8_t)serial->read(); }
 
-    // Parse from the head of the buffer. On any parse failure we drop exactly
-    // one byte and retry the new alignment — a single bad byte costs a single
-    // frame, not the whole pipeline of queued good frames.
-    int lastStatus = -1; // default: not enough bytes for even a header
-    while (rxBufLen >= HEADER_SIZE + 1)
-    {
-        int hdr = (rxBuf[0] << 8) | rxBuf[1];
-        int nf  = rxBuf[2];
+    int lastStatus = -1;
 
-        if (nf < 0 || nf > maxFloats)
-        {
-            // Implausible numFloats — can't be the start of a real frame.
-            memmove(rxBuf, rxBuf + 1, --rxBufLen);
+    // Sync-scan loop. On any per-frame failure we drop the leading sync (or 1
+    // junk byte if no sync was found yet) and rescan.
+    while (rxBufLen >= SYNC_SIZE)
+    {
+        // Find the next 0xA5 0x5A in rxBuf.
+        int syncIdx = -1;
+        for (int i = 0; i + 1 < rxBufLen; i++) {
+            if (rxBuf[i] == SYNC_0 && rxBuf[i + 1] == SYNC_1) {
+                syncIdx = i;
+                break;
+            }
+        }
+
+        if (syncIdx < 0) {
+            // No sync anywhere. Drop everything except the trailing byte (it
+            // might be a 0xA5 starting a sync that hasn't completed yet).
+            if (rxBufLen > 1) {
+                rxBuf[0] = rxBuf[rxBufLen - 1];
+                rxBufLen = 1;
+            }
+            return lastStatus;
+        }
+
+        // Drop pre-sync junk.
+        if (syncIdx > 0) {
+            int remaining = rxBufLen - syncIdx;
+            memmove(rxBuf, rxBuf + syncIdx, remaining);
+            rxBufLen = remaining;
+        }
+
+        // Need at least sync + header + count = 5 bytes to look at numFloats.
+        if (rxBufLen < SYNC_SIZE + HEADER_SIZE + 1) {
+            return -1;
+        }
+
+        int hdr = (rxBuf[SYNC_SIZE] << 8) | rxBuf[SYNC_SIZE + 1];
+        int nf  = rxBuf[SYNC_SIZE + HEADER_SIZE];
+
+        if (nf < 0 || nf > maxFloats) {
+            // Implausible numFloats — false sync. Drop the sync bytes only;
+            // a real sync may follow shortly.
+            memmove(rxBuf, rxBuf + SYNC_SIZE, rxBufLen - SYNC_SIZE);
+            rxBufLen -= SYNC_SIZE;
             lastStatus = -4;
             continue;
         }
 
-        int total = HEADER_SIZE + 1 + nf * FLOAT_SIZE + CHECKSUM_SIZE;
-        if (rxBufLen < total)
-        {
-            // Header looks plausible but frame isn't fully in yet; come back
-            // next call with more bytes.
+        int total = SYNC_SIZE + HEADER_SIZE + 1 + nf * FLOAT_SIZE + CRC_SIZE;
+        if (rxBufLen < total) {
+            // Frame not fully arrived yet. Come back next call.
             return -2;
         }
 
-        uint8_t chk = computeChecksum(rxBuf, total - CHECKSUM_SIZE);
-        if (chk != rxBuf[total - 1])
-        {
-            // Bad checksum — drop one byte and try the next alignment. We do
-            // NOT drain the rest of the buffer: the byte after this bad frame
-            // is very likely the start of a good one.
-            memmove(rxBuf, rxBuf + 1, --rxBufLen);
+        // CRC check covers [hdr_hi, hdr_lo, numFloats, float_bytes] — sync excluded.
+        uint16_t computed = crc16_ccitt(&rxBuf[SYNC_SIZE],
+                                         HEADER_SIZE + 1 + nf * FLOAT_SIZE);
+        uint16_t received = (uint16_t)rxBuf[total - 2]
+                          | ((uint16_t)rxBuf[total - 1] << 8);
+
+        if (computed != received) {
+            // False sync match (junk byte happened to be 0xA5 0x5A) or real
+            // frame got corrupted. Drop the sync; rescan finds the next.
+            memmove(rxBuf, rxBuf + SYNC_SIZE, rxBufLen - SYNC_SIZE);
+            rxBufLen -= SYNC_SIZE;
             lastStatus = -3;
             continue;
         }
 
-        // Valid frame. Extract floats and consume `total` bytes from the buffer.
+        // Valid frame. Extract.
         header    = hdr;
         numFloats = nf;
-        for (int i = 0; i < nf; i++)
-        { memcpy(&data[i], &rxBuf[HEADER_SIZE + 1 + i * FLOAT_SIZE], FLOAT_SIZE); }
+        for (int i = 0; i < nf; i++) {
+            memcpy(&data[i],
+                   &rxBuf[SYNC_SIZE + HEADER_SIZE + 1 + i * FLOAT_SIZE],
+                   FLOAT_SIZE);
+        }
 
         int remaining = rxBufLen - total;
         if (remaining > 0) memmove(rxBuf, rxBuf + total, remaining);

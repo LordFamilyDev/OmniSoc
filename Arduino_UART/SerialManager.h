@@ -2,12 +2,27 @@
 #define SerialManager_H
 
 #include <Arduino.h>
+
+// OmniSoc UART framing v2:
+//   [0xA5][0x5A][hdr_hi][hdr_lo][numFloats][float bytes][crc16_lo][crc16_hi]
+//
+// Sync bytes are an advisory pre-filter for parser scan — float payload
+// CAN contain those byte values; CRC-16 (CCITT-FALSE, poly 0x1021, init
+// 0xFFFF, no reflection, no xorout) is the actual frame-validity authority.
+// CRC is computed over [hdr_hi, hdr_lo, numFloats, float_bytes] only —
+// NOT over the sync bytes.
+//
+// Total frame size: 7 + 4*numFloats bytes.
+
 class SerialManager {
 private:
     HardwareSerial* serial;
-    const int HEADER_SIZE = 2;
-    const int CHECKSUM_SIZE = 1;
-    const int FLOAT_SIZE = 4;
+    static const uint8_t SYNC_0 = 0xA5;
+    static const uint8_t SYNC_1 = 0x5A;
+    static const int SYNC_SIZE = 2;
+    static const int HEADER_SIZE = 2;
+    static const int CRC_SIZE = 2;
+    static const int FLOAT_SIZE = 4;
     bool timeoutFlag = true;
     bool seekingFlag = true;
     long lastTimeoutClock = 0;
@@ -17,8 +32,8 @@ private:
 
     long byteSpacingTime_us = -1;
 
-    // Internal accumulation buffer for byte-by-byte resync on parse failure.
-    // Holds 2+ max-size frames (max frame = HEADER_SIZE + 1 + maxFloats*FLOAT_SIZE + CHECKSUM_SIZE = 44 B).
+    // Internal accumulation buffer for sync-scan resync.
+    // Holds 2+ max-size frames (max frame = 7 + 10*4 = 47 B at maxFloats=10).
     static const int RX_BUF_SIZE = 128;
     uint8_t rxBuf[RX_BUF_SIZE];
     int rxBufLen = 0;
@@ -42,7 +57,7 @@ public:
 
     //attempts to clear until the end of a message (blocking).
     void flushIncomingSerial();
-    
+
     //flush asyncronously through rapid calling (every main loop) until returns true
     bool asyncFlushIncomingSerial();
 
@@ -64,13 +79,19 @@ public:
     int receiveMessage(int& header, float* data, int& numFloats);
 
 private:
-    uint8_t computeChecksum(const uint8_t* data, int size) {
-        uint8_t checksum = 0;
-        for (int i = 0; i < size; i++) {
-            checksum ^= data[i];
+    // CRC-16/CCITT-FALSE — poly 0x1021, init 0xFFFF, no reflection, no xorout.
+    // Test vector: crc16_ccitt("123456789", 9) == 0x29B1.
+    static uint16_t crc16_ccitt(const uint8_t* data, int len) {
+        uint16_t crc = 0xFFFF;
+        for (int i = 0; i < len; i++) {
+            crc ^= ((uint16_t)data[i]) << 8;
+            for (int j = 0; j < 8; j++) {
+                if (crc & 0x8000) crc = (uint16_t)((crc << 1) ^ 0x1021);
+                else              crc = (uint16_t)(crc << 1);
+            }
         }
-        return checksum;
+        return crc;
     }
 };
 
-#endif // SERIAL_MANAGER_H
+#endif // SerialManager_H

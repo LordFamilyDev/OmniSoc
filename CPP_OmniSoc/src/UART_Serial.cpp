@@ -98,25 +98,31 @@ bool UART_Serial::asyncFlushIncomingSerial() {
 
 int UART_Serial::sendMessage(int header, const std::vector<float>& data) {
     int numFloats = data.size();
-    uint8_t messageSize = HEADER_SIZE + 1 + numFloats * FLOAT_SIZE + CHECKSUM_SIZE;
+    int messageSize = SYNC_SIZE + HEADER_SIZE + 1 + numFloats * FLOAT_SIZE + CRC_SIZE;
     std::vector<uint8_t> message(messageSize);
 
-    message[0] = (header >> 8) & 0xFF;
-    message[1] = header & 0xFF;
-    message[2] = (uint8_t)numFloats;
+    // Sync bytes (advisory pre-filter for the receiver — not in the CRC).
+    message[0] = SYNC_0;
+    message[1] = SYNC_1;
 
+    // Header (big-endian).
+    message[SYNC_SIZE + 0] = (header >> 8) & 0xFF;
+    message[SYNC_SIZE + 1] = header & 0xFF;
+
+    // numFloats.
+    message[SYNC_SIZE + HEADER_SIZE] = (uint8_t)numFloats;
+
+    // Float payload.
     for (int i = 0; i < numFloats; ++i) {
-        /*
-        const uint8_t* floatBytes = reinterpret_cast<const uint8_t*>(&data[i]);
-        for (int j = 0; j < FLOAT_SIZE; ++j) {
-            message[HEADER_SIZE + 1 + i * FLOAT_SIZE + j] = floatBytes[j];
-        }
-        */
-        memcpy(&message[HEADER_SIZE + 1 + i * FLOAT_SIZE], &data[i], FLOAT_SIZE);
+        memcpy(&message[SYNC_SIZE + HEADER_SIZE + 1 + i * FLOAT_SIZE],
+               &data[i], FLOAT_SIZE);
     }
 
-    uint8_t checksum = computeChecksum(message.data(), messageSize - CHECKSUM_SIZE);
-    message[messageSize - 1] = checksum;
+    // CRC-16 over [hdr_hi, hdr_lo, numFloats, float_bytes] — sync excluded.
+    uint16_t crc = crc16_ccitt(&message[SYNC_SIZE],
+                               HEADER_SIZE + 1 + numFloats * FLOAT_SIZE);
+    message[messageSize - 2] = (uint8_t)(crc & 0xFF);          // little-endian
+    message[messageSize - 1] = (uint8_t)((crc >> 8) & 0xFF);
 
     boost::system::error_code ec;
     boost::asio::write(serial_, boost::asio::buffer(message), ec);
@@ -130,7 +136,8 @@ int UART_Serial::sendMessage(int header, const std::vector<float>& data) {
 
 int UART_Serial::receiveMessage(int& header, std::vector<float>& data) {
     std::lock_guard<std::mutex> lock(buffer_mutex_);
-    if (!timeoutFlag && !seekingFlag && std::chrono::steady_clock::now() - lastTimeoutClock > std::chrono::milliseconds(timeoutPeriod_ms_)) {
+    if (!timeoutFlag && !seekingFlag &&
+        std::chrono::steady_clock::now() - lastTimeoutClock > std::chrono::milliseconds(timeoutPeriod_ms_)) {
         timeoutFlag = true;
     }
 
@@ -138,75 +145,100 @@ int UART_Serial::receiveMessage(int& header, std::vector<float>& data) {
         return -5;
     }
 
-    if (lastHeader == -1) {
-        if (buffer_.size() < HEADER_SIZE + 1) {
-            return 0;
+    int lastStatus = -1;
+
+    // Sync-scan loop. On any per-frame failure we drop the leading sync (or
+    // the trailing junk) and rescan. Mirrors the Arduino implementation.
+    while ((int)buffer_.size() >= SYNC_SIZE) {
+        // Find the next 0xA5 0x5A.
+        int n = (int)buffer_.size();
+        int syncIdx = -1;
+        for (int i = 0; i + 1 < n; i++) {
+            if ((uint8_t)buffer_[i] == SYNC_0 && (uint8_t)buffer_[i + 1] == SYNC_1) {
+                syncIdx = i;
+                break;
+            }
         }
 
-        std::vector<uint8_t> headerBytes(buffer_.begin(), buffer_.begin() + HEADER_SIZE + 1);
-        lastHeader = (headerBytes[0] << 8) | headerBytes[1];
-        lastNumFloats = headerBytes[2];
-        header = lastHeader;
-        buffer_.erase(buffer_.begin(), buffer_.begin() + HEADER_SIZE + 1);
-        //std::cout << "last header:" << lastHeader <<" , num floats:"<<lastNumFloats<< std::endl;
-
-        if (lastNumFloats > maxFloats)
-        {
-            setSeekingFlag();
-            lastHeader = -1;
-            lastNumFloats = 0;
-            return -4;
+        if (syncIdx < 0) {
+            // No sync anywhere. Drop everything except the trailing byte (it
+            // might be a 0xA5 starting a sync that hasn't completed yet).
+            if (n > 1) {
+                char last = buffer_[n - 1];
+                buffer_.clear();
+                buffer_.push_back(last);
+            }
+            return lastStatus;
         }
+
+        // Drop pre-sync junk.
+        if (syncIdx > 0) {
+            buffer_.erase(buffer_.begin(), buffer_.begin() + syncIdx);
+        }
+
+        // Need at least sync + header + count = 5 bytes to look at numFloats.
+        if ((int)buffer_.size() < SYNC_SIZE + HEADER_SIZE + 1) {
+            return -1;
+        }
+
+        int hdr = ((uint8_t)buffer_[SYNC_SIZE] << 8) | (uint8_t)buffer_[SYNC_SIZE + 1];
+        int nf  = (uint8_t)buffer_[SYNC_SIZE + HEADER_SIZE];
+
+        if (nf < 0 || nf > maxFloats) {
+            // Implausible numFloats — false sync. Drop the sync bytes only.
+            buffer_.erase(buffer_.begin(), buffer_.begin() + SYNC_SIZE);
+            lastStatus = -4;
+            continue;
+        }
+
+        int total = SYNC_SIZE + HEADER_SIZE + 1 + nf * FLOAT_SIZE + CRC_SIZE;
+        if ((int)buffer_.size() < total) {
+            // Frame not fully arrived yet. Come back next call.
+            return -2;
+        }
+
+        // CRC over [hdr_hi, hdr_lo, numFloats, float_bytes] — sync excluded.
+        uint16_t computed = crc16_ccitt((const uint8_t*)&buffer_[SYNC_SIZE],
+                                          HEADER_SIZE + 1 + nf * FLOAT_SIZE);
+        uint16_t received = (uint16_t)(uint8_t)buffer_[total - 2]
+                          | ((uint16_t)(uint8_t)buffer_[total - 1] << 8);
+
+        if (computed != received) {
+            // False sync match or real frame got corrupted. Drop the sync;
+            // rescan finds the next.
+            buffer_.erase(buffer_.begin(), buffer_.begin() + SYNC_SIZE);
+            lastStatus = -3;
+            continue;
+        }
+
+        // Valid frame.
+        header = hdr;
+        data.resize(nf);
+        for (int i = 0; i < nf; i++) {
+            memcpy(&data[i],
+                   &buffer_[SYNC_SIZE + HEADER_SIZE + 1 + i * FLOAT_SIZE],
+                   FLOAT_SIZE);
+        }
+        buffer_.erase(buffer_.begin(), buffer_.begin() + total);
+
+        timeoutFlag = false;
+        lastTimeoutClock = std::chrono::steady_clock::now();
+        return 1;
     }
-    else
-    {
-        header = lastHeader;
-    }
 
-    int bodySize = lastNumFloats * FLOAT_SIZE + CHECKSUM_SIZE; // float data + checksum
-    if (buffer_.size() < bodySize) {
-        return -2; //wait for complete message
-    }
-
-    int messageSize = bodySize + HEADER_SIZE + 1;
-
-    std::vector<uint8_t> message(buffer_.begin(), buffer_.begin() + bodySize);
-    buffer_.erase(buffer_.begin(), buffer_.begin() + bodySize);
-
-
-    data.resize(lastNumFloats);
-    for (int i = 0; i < lastNumFloats; ++i) {
-        data[i] = *reinterpret_cast<float*>(&message[i * FLOAT_SIZE]);
-    }
-
-    //add message header to front of message for checksum (match sendMessage byte order: high, low, numFloats)
-    uint8_t highByte = (uint8_t)((lastHeader >> 8) & 0xFF);
-    uint8_t lowByte  = (uint8_t)(lastHeader & 0xFF);
-    message.insert(message.begin(), (uint8_t)lastNumFloats);
-    message.insert(message.begin(), lowByte);
-    message.insert(message.begin(), highByte);
-
-    lastHeader = -1;
-    lastNumFloats = 0;
-
-    uint8_t checksum = computeChecksum(message.data(), messageSize - CHECKSUM_SIZE);
-    //std::cout << "checksum: " << checksum << " ; " << message[messageSize - 1] << std::endl;
-    if (checksum != message[messageSize - 1]) {
-        setSeekingFlag();
-        return -3;
-    }
-
-    timeoutFlag = false;
-    lastTimeoutClock = std::chrono::steady_clock::now();
-    return 1;
+    return lastStatus;
 }
 
-uint8_t UART_Serial::computeChecksum(const uint8_t* data, int size) {
-    uint8_t checksum = 0;
-    for (int i = 0; i < size; ++i) {
-        checksum ^= data[i];
+uint16_t UART_Serial::crc16_ccitt(const uint8_t* data, int len) {
+    uint16_t crc = 0xFFFF;
+    for (int i = 0; i < len; ++i) {
+        crc ^= ((uint16_t)data[i]) << 8;
+        for (int j = 0; j < 8; ++j) {
+            if (crc & 0x8000) crc = (uint16_t)((crc << 1) ^ 0x1021);
+            else              crc = (uint16_t)(crc << 1);
+        }
     }
-    return checksum;
+    return crc;
 }
 
 void UART_Serial::readFromSerial() {
