@@ -53,10 +53,11 @@ install(TARGETS OmniSoc
 )
 
 # Install headers
-install(FILES 
+install(FILES
     include/Socket_Serial.h
     include/UART_Serial.h
     include/BLE_Serial.h
+    include/PackBytes.h
     DESTINATION include/OmniSoc
 )
 

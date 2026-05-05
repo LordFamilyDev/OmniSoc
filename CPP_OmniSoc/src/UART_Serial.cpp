@@ -8,8 +8,10 @@
 #  include <unistd.h>
 #endif
 
-UART_Serial::UART_Serial(const std::string& port, unsigned int baud_rate, int timeoutPeriod_ms)
-    : serial_(io_context_), port_(port), baud_rate_(baud_rate), timeoutPeriod_ms_(timeoutPeriod_ms), running_(false) {}
+UART_Serial::UART_Serial(const std::string& port, unsigned int baud_rate, int timeoutPeriod_ms,
+                         bool tx_pacing_enabled)
+    : serial_(io_context_), port_(port), baud_rate_(baud_rate), timeoutPeriod_ms_(timeoutPeriod_ms),
+      running_(false), tx_pacing_enabled_(tx_pacing_enabled) {}
 
 UART_Serial::~UART_Serial() {
     disconnect();
@@ -102,6 +104,17 @@ int UART_Serial::sendMessage(uint8_t header, const uint8_t* bytes, uint8_t len) 
         return -1;
     }
 
+    // Serialize concurrent senders + apply TX pacing. Boost ASIO does not
+    // synchronize concurrent writes on a serial_port; we have to.
+    std::lock_guard<std::mutex> tx_lock(send_mutex_);
+
+    if (tx_pacing_enabled_ && byteSpacingTime_us > 0) {
+        auto now = std::chrono::steady_clock::now();
+        if (now < earliest_next_send_) {
+            std::this_thread::sleep_until(earliest_next_send_);
+        }
+    }
+
     int messageSize = FRAME_OVERHEAD + len;
     std::vector<uint8_t> message(messageSize);
 
@@ -124,6 +137,17 @@ int UART_Serial::sendMessage(uint8_t header, const uint8_t* bytes, uint8_t len) 
     if (ec) {
         std::cerr << "Error writing to serial port: " << ec.message() << std::endl;
         return -1;
+    }
+
+    if (tx_pacing_enabled_ && byteSpacingTime_us > 0) {
+        // Reserve wire time = messageSize * byteSpacingTime_us for this frame.
+        // Next sendMessage waits at least this long, so consecutive frames
+        // arrive at the receiver no faster than the baud rate can deliver
+        // them — receiver HW UART buffer fills at the baud rate ≤ its drain
+        // rate, never overflowing.
+        long wire_time_us = (long)messageSize * byteSpacingTime_us;
+        earliest_next_send_ = std::chrono::steady_clock::now()
+                            + std::chrono::microseconds(wire_time_us);
     }
 
     return 1;
@@ -273,13 +297,28 @@ void UART_Serial::readFromSerial() {
         boost::system::error_code ec;
         std::size_t bytes_read = serial_.read_some(boost::asio::buffer(temp), ec);
 
-        if (ec && ec != boost::asio::error::would_block) {
-            // VTIME=1 makes idle reads return 0 bytes successfully; only a
-            // genuine error (device removed, EOF on a closed FD) lands here.
-            // Back off so we don't burn a core and flood stderr.
-            std::cerr << "Error reading from serial port: " << ec.message() << std::endl;
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
-            continue;
+        if (ec) {
+            if (ec == boost::asio::error::would_block) {
+                // Normal idle on non-blocking platforms — no data right now.
+            } else if (ec == boost::asio::error::eof ||
+                       ec == boost::asio::error::operation_aborted ||
+                       ec == boost::asio::error::bad_descriptor) {
+                // Device gone (cable unplugged, peer closed, fd closed by
+                // disconnect()). Retrying just busy-loops with sleeps and
+                // makes shutdown drag (50 ms × N iterations). Exit the read
+                // loop so disconnect()/join completes promptly. timeoutFlag
+                // = true marks the link as down for any caller polling
+                // isConnected().
+                std::cerr << "Serial port " << ec.message()
+                          << " — exiting read loop." << std::endl;
+                timeoutFlag = true;
+                break;
+            } else {
+                // Transient error: back off briefly.
+                std::cerr << "Error reading from serial port: " << ec.message() << std::endl;
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                continue;
+            }
         }
 
         if (bytes_read > 0) {

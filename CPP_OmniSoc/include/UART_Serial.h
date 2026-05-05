@@ -10,7 +10,8 @@
 
 class UART_Serial {
 public:
-    UART_Serial(const std::string& port, unsigned int baud_rate, int timeoutPeriod_ms);
+    UART_Serial(const std::string& port, unsigned int baud_rate, int timeoutPeriod_ms,
+                bool tx_pacing_enabled = true);
     ~UART_Serial();
 
     void connect();
@@ -59,6 +60,17 @@ private:
     std::mutex buffer_mutex_;
     std::atomic<bool> running_;
     std::thread read_thread_;
+
+    // TX self-pacing. sendMessage() waits until earliest_next_send_ before
+    // dispatching, then advances earliest_next_send_ by the new frame's
+    // wire time. This caps the on-wire byte rate at the configured baud
+    // rate, so a sender can fire-and-forget back-to-back frames without
+    // overflowing a slow receiver's HW UART buffer (Arduino is 64 B).
+    // Mutex also serializes concurrent senders on a shared serial_port —
+    // boost::asio doesn't guarantee that on its own.
+    std::mutex send_mutex_;
+    std::chrono::steady_clock::time_point earliest_next_send_;
+    bool tx_pacing_enabled_;
 
     // Position in buffer_ from which the parser should resume scanning for
     // the sync byte pair. Advanced past false syncs without compacting; the

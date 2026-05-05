@@ -42,8 +42,15 @@ class SerialManager:
     MAX_PAYLOAD = 48
     MAX_FLOATS = MAX_PAYLOAD // 4  # 12
 
-    def __init__(self, port='/dev/ttyUSB0', timeout_ms=20):
-        """Initialize the serial manager with port and timeout settings"""
+    def __init__(self, port='/dev/ttyUSB0', timeout_ms=20, tx_pacing_enabled=True):
+        """Initialize the serial manager with port and timeout settings.
+
+        tx_pacing_enabled: if True (default), send_message() blocks between
+        consecutive sends so that frames are delivered to the receiver no
+        faster than the baud rate can carry them. Prevents back-to-back
+        bursts from overflowing a slow receiver's HW UART buffer (Arduino
+        is 64 B). Disable only if you're sure your receiver can keep up.
+        """
         self.serial = serial.Serial()
         self.serial.port = port
         self.serial.timeout = timeout_ms / 1000.0  # Convert to seconds
@@ -52,10 +59,15 @@ class SerialManager:
         self.timeout_flag = True
         self._rx_buf = bytearray()
         self._scan_pos = 0
+        self._tx_pacing_enabled = tx_pacing_enabled
+        self._byte_spacing_us = 0  # set in connect()
+        self._earliest_next_send = 0.0  # monotonic seconds
 
     def connect(self, baud_rate=57600):
         """Connect to the serial port with specified baud rate"""
         self.serial.baudrate = baud_rate
+        # 10 bits per byte (1 start + 8 data + 1 stop) — wire time per byte.
+        self._byte_spacing_us = 10_000_000.0 / baud_rate
         try:
             if self.serial.is_open:
                 self.serial.close()
@@ -103,12 +115,26 @@ class SerialManager:
         message.append(crc & 0xFF)
         message.append((crc >> 8) & 0xFF)
 
+        # TX self-pacing: don't dispatch until the previous frame has had time
+        # to fully shift out at the baud rate. Caps the effective on-wire byte
+        # rate at the baud rate, so a slow receiver's HW UART buffer can never
+        # be overflowed by sender bursting.
+        if self._tx_pacing_enabled and self._byte_spacing_us > 0:
+            now = time.monotonic()
+            if now < self._earliest_next_send:
+                time.sleep(self._earliest_next_send - now)
+
         try:
             written = self.serial.write(message)
-            return 1 if written == len(message) else -1
         except serial.SerialException as e:
             print(f"Send error: {e}")
             return -1
+
+        if self._tx_pacing_enabled and self._byte_spacing_us > 0:
+            wire_time_s = (len(message) * self._byte_spacing_us) / 1_000_000.0
+            self._earliest_next_send = time.monotonic() + wire_time_s
+
+        return 1 if written == len(message) else -1
 
     def send_message_floats(self, header, floats):
         """Convenience wrapper: pack a sequence of floats little-endian and send."""
