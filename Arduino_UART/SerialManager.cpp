@@ -4,56 +4,29 @@
 
 void SerialManager::flushIncomingSerial()
 {
-    long tempTime = micros();
-    while(micros() - tempTime < byteSpacingTime_us * 2)
-    {
-        if(serial->available())
-        {
-            serial->read();
-            tempTime = micros();
-        }
-    }
+    while (serial->available()) serial->read();
+    rxBufLen = 0;
+    scan_pos = 0;
 }
 
-bool SerialManager::asyncFlushIncomingSerial()
+int SerialManager::sendMessage(uint8_t header, const uint8_t* bytes, uint8_t len)
 {
-    while(serial->available())
-    {
-        serial->read();
-        asyncFlushClock = micros();
-    }
+    if (len > MAX_PAYLOAD) return -1;
 
-    if(micros() - asyncFlushClock > byteSpacingTime_us * 2)
-    { return true; }
-
-    return false;
-}
-
-int SerialManager::sendMessage(int header, float* data, int numFloats)
-{
-    uint8_t messageSize = SYNC_SIZE + HEADER_SIZE + 1 + numFloats * FLOAT_SIZE + CRC_SIZE;
-    uint8_t message[messageSize];
+    uint8_t messageSize = FRAME_OVERHEAD + len;
+    uint8_t message[MAX_PAYLOAD + FRAME_OVERHEAD];
 
     // Sync bytes (advisory pre-filter for the receiver — not in the CRC).
     message[0] = SYNC_0;
     message[1] = SYNC_1;
-
-    // Header (big-endian).
-    message[SYNC_SIZE + 0] = (header >> 8) & 0xFF;
-    message[SYNC_SIZE + 1] = header & 0xFF;
-
-    // numFloats.
-    message[SYNC_SIZE + HEADER_SIZE] = numFloats;
-
-    // Float payload.
-    for (int i = 0; i < numFloats; i++) {
-        memcpy(&message[SYNC_SIZE + HEADER_SIZE + 1 + i * FLOAT_SIZE],
-               &data[i], FLOAT_SIZE);
+    message[SYNC_SIZE] = header;
+    message[SYNC_SIZE + HEADER_SIZE] = len;
+    if (len > 0) {
+        memcpy(&message[SYNC_SIZE + HEADER_SIZE + LEN_SIZE], bytes, len);
     }
 
-    // CRC-16 over [hdr_hi, hdr_lo, numFloats, float_bytes] — sync excluded.
-    uint16_t crc = crc16_ccitt(&message[SYNC_SIZE],
-                               HEADER_SIZE + 1 + numFloats * FLOAT_SIZE);
+    // CRC-16 over [hdr][len][bytes] — sync excluded.
+    uint16_t crc = crc16_ccitt(&message[SYNC_SIZE], HEADER_SIZE + LEN_SIZE + len);
     message[messageSize - 2] = (uint8_t)(crc & 0xFF);          // little-endian
     message[messageSize - 1] = (uint8_t)((crc >> 8) & 0xFF);
 
@@ -61,16 +34,21 @@ int SerialManager::sendMessage(int header, float* data, int numFloats)
     return 1;
 }
 
-int SerialManager::receiveMessage(int& header, float* data, int& numFloats)
+int SerialManager::sendMessage(uint8_t header, const float* data, uint8_t numFloats)
+{
+    uint8_t lenBytes = numFloats * 4;
+    if (lenBytes > MAX_PAYLOAD) return -1;
+    uint8_t buf[MAX_PAYLOAD];
+    if (numFloats > 0) memcpy(buf, data, lenBytes);
+    return sendMessage(header, buf, lenBytes);
+}
+
+int SerialManager::receiveMessage(uint8_t& header, uint8_t* bytes, uint8_t& len)
 {
     // Expire the connection if we haven't parsed a good frame in a while.
-    if (!timeoutFlag && !seekingFlag &&
+    if (!timeoutFlag &&
         millis() - lastTimeoutClock > timeoutPeriod_ms)
     { timeoutFlag = true; }
-
-    // Startup / manual-flush resync uses the quiet-gap detector in
-    // handleSynchronization(). During that window, don't touch the stream.
-    if (seekingFlag) { return -5; }
 
     // Drain whatever UART has into our internal buffer (bounded).
     while (serial->available() > 0 && rxBufLen < RX_BUF_SIZE)
@@ -78,13 +56,26 @@ int SerialManager::receiveMessage(int& header, float* data, int& numFloats)
 
     int lastStatus = -1;
 
-    // Sync-scan loop. On any per-frame failure we drop the leading sync (or 1
-    // junk byte if no sync was found yet) and rescan.
-    while (rxBufLen >= SYNC_SIZE)
+    // Sync-scan loop with scan_pos offset — advance past false syncs without
+    // memmoving the buffer. Compact only on valid frame extraction or when
+    // scan_pos exceeds half the buffer length.
+    while (true)
     {
-        // Find the next 0xA5 0x5A in rxBuf.
+        // Compact if scan_pos has crept too far forward.
+        if (scan_pos > 0 && scan_pos > rxBufLen / 2) {
+            int remaining = rxBufLen - scan_pos;
+            if (remaining > 0) memmove(rxBuf, rxBuf + scan_pos, remaining);
+            rxBufLen = remaining;
+            scan_pos = 0;
+        }
+
+        if (rxBufLen < scan_pos + SYNC_SIZE) {
+            return lastStatus;
+        }
+
+        // Find next 0xA5 0x5A starting at scan_pos.
         int syncIdx = -1;
-        for (int i = 0; i + 1 < rxBufLen; i++) {
+        for (int i = scan_pos; i + 1 < rxBufLen; i++) {
             if (rxBuf[i] == SYNC_0 && rxBuf[i + 1] == SYNC_1) {
                 syncIdx = i;
                 break;
@@ -92,77 +83,80 @@ int SerialManager::receiveMessage(int& header, float* data, int& numFloats)
         }
 
         if (syncIdx < 0) {
-            // No sync anywhere. Drop everything except the trailing byte (it
-            // might be a 0xA5 starting a sync that hasn't completed yet).
+            // No sync. Preserve trailing byte (possible 0xA5 with 0x5A pending).
             if (rxBufLen > 1) {
-                rxBuf[0] = rxBuf[rxBufLen - 1];
-                rxBufLen = 1;
+                scan_pos = rxBufLen - 1;
+            } else {
+                scan_pos = 0;
             }
             return lastStatus;
         }
 
-        // Drop pre-sync junk.
-        if (syncIdx > 0) {
-            int remaining = rxBufLen - syncIdx;
-            memmove(rxBuf, rxBuf + syncIdx, remaining);
-            rxBufLen = remaining;
-        }
-
-        // Need at least sync + header + count = 5 bytes to look at numFloats.
-        if (rxBufLen < SYNC_SIZE + HEADER_SIZE + 1) {
+        // Need sync + header + len = 4 bytes minimum to look at len.
+        if (rxBufLen < syncIdx + SYNC_SIZE + HEADER_SIZE + LEN_SIZE) {
+            scan_pos = syncIdx;
             return -1;
         }
 
-        int hdr = (rxBuf[SYNC_SIZE] << 8) | rxBuf[SYNC_SIZE + 1];
-        int nf  = rxBuf[SYNC_SIZE + HEADER_SIZE];
+        uint8_t hdr = rxBuf[syncIdx + SYNC_SIZE];
+        uint8_t plen = rxBuf[syncIdx + SYNC_SIZE + HEADER_SIZE];
 
-        if (nf < 0 || nf > maxFloats) {
-            // Implausible numFloats — false sync. Drop the sync bytes only;
-            // a real sync may follow shortly.
-            memmove(rxBuf, rxBuf + SYNC_SIZE, rxBufLen - SYNC_SIZE);
-            rxBufLen -= SYNC_SIZE;
+        if (plen > MAX_PAYLOAD) {
+            // Implausible len — false sync. Advance one byte and rescan.
+            scan_pos = syncIdx + 1;
             lastStatus = -4;
             continue;
         }
 
-        int total = SYNC_SIZE + HEADER_SIZE + 1 + nf * FLOAT_SIZE + CRC_SIZE;
+        int total = syncIdx + FRAME_OVERHEAD + plen;
         if (rxBufLen < total) {
-            // Frame not fully arrived yet. Come back next call.
+            // Frame not fully arrived yet. Stay parked at this sync.
+            scan_pos = syncIdx;
             return -2;
         }
 
-        // CRC check covers [hdr_hi, hdr_lo, numFloats, float_bytes] — sync excluded.
-        uint16_t computed = crc16_ccitt(&rxBuf[SYNC_SIZE],
-                                         HEADER_SIZE + 1 + nf * FLOAT_SIZE);
+        // CRC over [hdr][len][bytes] — sync excluded.
+        uint16_t computed = crc16_ccitt(&rxBuf[syncIdx + SYNC_SIZE], HEADER_SIZE + LEN_SIZE + plen);
         uint16_t received = (uint16_t)rxBuf[total - 2]
                           | ((uint16_t)rxBuf[total - 1] << 8);
 
         if (computed != received) {
-            // False sync match (junk byte happened to be 0xA5 0x5A) or real
-            // frame got corrupted. Drop the sync; rescan finds the next.
-            memmove(rxBuf, rxBuf + SYNC_SIZE, rxBufLen - SYNC_SIZE);
-            rxBufLen -= SYNC_SIZE;
+            // False sync match or corrupted frame. Advance past this sync byte.
+            scan_pos = syncIdx + 1;
             lastStatus = -3;
             continue;
         }
 
         // Valid frame. Extract.
-        header    = hdr;
-        numFloats = nf;
-        for (int i = 0; i < nf; i++) {
-            memcpy(&data[i],
-                   &rxBuf[SYNC_SIZE + HEADER_SIZE + 1 + i * FLOAT_SIZE],
-                   FLOAT_SIZE);
-        }
+        header = hdr;
+        len = plen;
+        if (plen > 0) memcpy(bytes, &rxBuf[syncIdx + SYNC_SIZE + HEADER_SIZE + LEN_SIZE], plen);
 
         int remaining = rxBufLen - total;
         if (remaining > 0) memmove(rxBuf, rxBuf + total, remaining);
         rxBufLen = remaining;
+        scan_pos = 0;
 
         timeoutFlag = false;
         lastTimeoutClock = millis();
         return 1;
     }
+}
 
-    return lastStatus;
+int SerialManager::receiveMessage(uint8_t& header, float* data, uint8_t& numFloats)
+{
+    uint8_t buf[MAX_PAYLOAD];
+    uint8_t len = 0;
+    int rc = receiveMessage(header, buf, len);
+    if (rc != 1) {
+        numFloats = 0;
+        return rc;
+    }
+    if (len % 4 != 0) {
+        numFloats = 0;
+        return -6;
+    }
+    numFloats = len / 4;
+    if (numFloats > 0) memcpy(data, buf, len);
+    return 1;
 }

@@ -1,5 +1,8 @@
 #include "UART_Serial.h"
 
+#include <cmath>
+#include <cstring>
+
 #if defined(__unix__) || defined(__APPLE__)
 #  include <termios.h>
 #  include <unistd.h>
@@ -26,24 +29,33 @@ void UART_Serial::connect() {
     serial_.set_option(boost::asio::serial_port_base::flow_control(boost::asio::serial_port_base::flow_control::none));
 
 #if defined(__unix__) || defined(__APPLE__)
-    // Put the TTY in raw mode. Boost ASIO's flow_control::none only clears
-    // hardware RTS/CTS; it leaves ICANON (line buffering) and IXON/IXOFF
-    // (software flow control) at the kernel default, which is typically ON.
-    // With IXON on, binary bytes that happen to equal XOFF (0x13) silently
-    // stall writes until an XON (0x11) byte arrives — deadlocking sendMessage()
-    // under sustained traffic. With ICANON on, the kernel withholds bytes
-    // from read() until a newline arrives. cfmakeraw() disables both plus
-    // signal chars, echo, and output post-processing.
+    // Put the TTY in raw mode AND configure the kernel-side read timeout.
+    //
+    // Boost ASIO's flow_control::none only clears hardware RTS/CTS; it leaves
+    // ICANON (line buffering) and IXON/IXOFF (software flow control) at the
+    // kernel default, which is typically ON. With IXON on, binary bytes that
+    // happen to equal XOFF (0x13) silently stall writes until an XON (0x11)
+    // byte arrives — deadlocking sendMessage() under sustained traffic. With
+    // ICANON on, the kernel withholds bytes from read() until a newline
+    // arrives. cfmakeraw() disables both plus signal chars, echo, and output
+    // post-processing.
+    //
+    // VMIN=0, VTIME=1 (100 ms) makes read() return within 100 ms with
+    // whatever bytes are available (or zero on idle). This is the kernel-side
+    // shutdown bound: the read thread observes running_=false within 100 ms
+    // of disconnect() instead of blocking forever on an idle FD. Must be set
+    // AFTER cfmakeraw() because cfmakeraw() resets VMIN=1, VTIME=0.
     int fd = serial_.native_handle();
     termios tio{};
     if (tcgetattr(fd, &tio) == 0) {
         cfmakeraw(&tio);
+        tio.c_cc[VMIN]  = 0;
+        tio.c_cc[VTIME] = 1;
         tcsetattr(fd, TCSANOW, &tio);
     }
 #endif
 
     byteSpacingTime_us = static_cast<long>(ceil(10000000.0 / baud_rate_));
-    asyncFlushClock = std::chrono::steady_clock::now();
     lastTimeoutClock = std::chrono::steady_clock::now();
     timeoutFlag = false;
 
@@ -54,17 +66,15 @@ void UART_Serial::disconnect() {
     timeoutFlag = true;
     running_ = false;
 
-    // Close the fd first so any thread blocked inside serial_.read_some()
-    // unblocks with an error and can observe running_=false. Without this
-    // the read thread stays parked in a kernel read() forever and
-    // stopWorkThreads() -> join() deadlocks, leaving a zombie process.
+    // VTIME bounds each kernel read at 100 ms, so the read thread observes
+    // running_=false and exits cleanly. Join first, then close — no need to
+    // race-close the FD to wake a blocked reader anymore.
+    stopWorkThreads();
+
     boost::system::error_code ec;
     if (serial_.is_open()) {
-        serial_.cancel(ec);
         serial_.close(ec);
     }
-
-    stopWorkThreads();
 }
 
 bool UART_Serial::isConnected() {
@@ -77,50 +87,35 @@ size_t UART_Serial::available() {
 }
 
 void UART_Serial::flushIncomingSerial() {
-    auto tempTime = std::chrono::steady_clock::now();
-    while (std::chrono::steady_clock::now() - tempTime < std::chrono::microseconds(byteSpacingTime_us * 2)) {
-        if (available() > 0) {
-            std::lock_guard<std::mutex> lock(buffer_mutex_); //releases on scope drop
-            buffer_.clear();
-            tempTime = std::chrono::steady_clock::now();
-        }
-    }
-}
-
-bool UART_Serial::asyncFlushIncomingSerial() {
     std::lock_guard<std::mutex> lock(buffer_mutex_);
-    if (!buffer_.empty()) {
-        buffer_.clear();
-        asyncFlushClock = std::chrono::steady_clock::now();
+    buffer_.clear();
+    scan_pos_ = 0;
+#if defined(__unix__) || defined(__APPLE__)
+    if (serial_.is_open()) {
+        tcflush(serial_.native_handle(), TCIFLUSH);
     }
-    return std::chrono::steady_clock::now() - asyncFlushClock > std::chrono::microseconds(byteSpacingTime_us * 2);
+#endif
 }
 
-int UART_Serial::sendMessage(int header, const std::vector<float>& data) {
-    int numFloats = data.size();
-    int messageSize = SYNC_SIZE + HEADER_SIZE + 1 + numFloats * FLOAT_SIZE + CRC_SIZE;
+int UART_Serial::sendMessage(uint8_t header, const uint8_t* bytes, uint8_t len) {
+    if (len > MAX_PAYLOAD) {
+        return -1;
+    }
+
+    int messageSize = FRAME_OVERHEAD + len;
     std::vector<uint8_t> message(messageSize);
 
     // Sync bytes (advisory pre-filter for the receiver — not in the CRC).
     message[0] = SYNC_0;
     message[1] = SYNC_1;
-
-    // Header (big-endian).
-    message[SYNC_SIZE + 0] = (header >> 8) & 0xFF;
-    message[SYNC_SIZE + 1] = header & 0xFF;
-
-    // numFloats.
-    message[SYNC_SIZE + HEADER_SIZE] = (uint8_t)numFloats;
-
-    // Float payload.
-    for (int i = 0; i < numFloats; ++i) {
-        memcpy(&message[SYNC_SIZE + HEADER_SIZE + 1 + i * FLOAT_SIZE],
-               &data[i], FLOAT_SIZE);
+    message[SYNC_SIZE] = header;
+    message[SYNC_SIZE + HEADER_SIZE] = len;
+    if (len > 0) {
+        std::memcpy(&message[SYNC_SIZE + HEADER_SIZE + LEN_SIZE], bytes, len);
     }
 
-    // CRC-16 over [hdr_hi, hdr_lo, numFloats, float_bytes] — sync excluded.
-    uint16_t crc = crc16_ccitt(&message[SYNC_SIZE],
-                               HEADER_SIZE + 1 + numFloats * FLOAT_SIZE);
+    // CRC-16 over [hdr][len][bytes] — sync excluded.
+    uint16_t crc = crc16_ccitt(&message[SYNC_SIZE], HEADER_SIZE + LEN_SIZE + len);
     message[messageSize - 2] = (uint8_t)(crc & 0xFF);          // little-endian
     message[messageSize - 1] = (uint8_t)((crc >> 8) & 0xFF);
 
@@ -134,99 +129,130 @@ int UART_Serial::sendMessage(int header, const std::vector<float>& data) {
     return 1;
 }
 
-int UART_Serial::receiveMessage(int& header, std::vector<float>& data) {
+int UART_Serial::sendMessage(uint8_t header, const float* data, uint8_t numFloats) {
+    uint8_t lenBytes = numFloats * 4;
+    if (lenBytes > MAX_PAYLOAD) {
+        return -1;
+    }
+    uint8_t buf[MAX_PAYLOAD];
+    if (numFloats > 0) {
+        std::memcpy(buf, data, lenBytes);
+    }
+    return sendMessage(header, buf, lenBytes);
+}
+
+int UART_Serial::receiveMessage(uint8_t& header, uint8_t* bytes, uint8_t& len) {
     std::lock_guard<std::mutex> lock(buffer_mutex_);
-    if (!timeoutFlag && !seekingFlag &&
+    if (!timeoutFlag &&
         std::chrono::steady_clock::now() - lastTimeoutClock > std::chrono::milliseconds(timeoutPeriod_ms_)) {
         timeoutFlag = true;
     }
 
-    if (seekingFlag) {
-        return -5;
-    }
-
     int lastStatus = -1;
 
-    // Sync-scan loop. On any per-frame failure we drop the leading sync (or
-    // the trailing junk) and rescan. Mirrors the Arduino implementation.
-    while ((int)buffer_.size() >= SYNC_SIZE) {
-        // Find the next 0xA5 0x5A.
-        int n = (int)buffer_.size();
-        int syncIdx = -1;
-        for (int i = 0; i + 1 < n; i++) {
-            if ((uint8_t)buffer_[i] == SYNC_0 && (uint8_t)buffer_[i + 1] == SYNC_1) {
+    // Sync-scan loop with scan_pos_ offset — advance past false syncs without
+    // memmoving the buffer. Compact only on valid frame extraction or when
+    // scan_pos_ exceeds half the buffer size.
+    while (true) {
+        // Compact the leading garbage if scan_pos_ has crept too far forward.
+        if (scan_pos_ > 0 && scan_pos_ > buffer_.size() / 2) {
+            buffer_.erase(buffer_.begin(), buffer_.begin() + scan_pos_);
+            scan_pos_ = 0;
+        }
+
+        if (buffer_.size() < scan_pos_ + SYNC_SIZE) {
+            return lastStatus;
+        }
+
+        // Find next 0xA5 0x5A starting at scan_pos_.
+        size_t syncIdx = 0;
+        bool found = false;
+        for (size_t i = scan_pos_; i + 1 < buffer_.size(); ++i) {
+            if (buffer_[i] == SYNC_0 && buffer_[i + 1] == SYNC_1) {
                 syncIdx = i;
+                found = true;
                 break;
             }
         }
 
-        if (syncIdx < 0) {
-            // No sync anywhere. Drop everything except the trailing byte (it
-            // might be a 0xA5 starting a sync that hasn't completed yet).
-            if (n > 1) {
-                char last = buffer_[n - 1];
-                buffer_.clear();
-                buffer_.push_back(last);
+        if (!found) {
+            // No sync. Preserve trailing byte in case it's a 0xA5 starting an
+            // incomplete sync; everything before it is junk.
+            if (buffer_.size() > 1) {
+                scan_pos_ = buffer_.size() - 1;
+            } else {
+                scan_pos_ = 0;
             }
             return lastStatus;
         }
 
-        // Drop pre-sync junk.
-        if (syncIdx > 0) {
-            buffer_.erase(buffer_.begin(), buffer_.begin() + syncIdx);
-        }
-
-        // Need at least sync + header + count = 5 bytes to look at numFloats.
-        if ((int)buffer_.size() < SYNC_SIZE + HEADER_SIZE + 1) {
+        // Need sync + header + len = 4 bytes minimum to inspect len.
+        if (buffer_.size() < syncIdx + SYNC_SIZE + HEADER_SIZE + LEN_SIZE) {
+            scan_pos_ = syncIdx;
             return -1;
         }
 
-        int hdr = ((uint8_t)buffer_[SYNC_SIZE] << 8) | (uint8_t)buffer_[SYNC_SIZE + 1];
-        int nf  = (uint8_t)buffer_[SYNC_SIZE + HEADER_SIZE];
+        uint8_t hdr = buffer_[syncIdx + SYNC_SIZE];
+        uint8_t plen = buffer_[syncIdx + SYNC_SIZE + HEADER_SIZE];
 
-        if (nf < 0 || nf > maxFloats) {
-            // Implausible numFloats — false sync. Drop the sync bytes only.
-            buffer_.erase(buffer_.begin(), buffer_.begin() + SYNC_SIZE);
+        if (plen > MAX_PAYLOAD) {
+            // Implausible len — false sync. Advance one byte.
+            scan_pos_ = syncIdx + 1;
             lastStatus = -4;
             continue;
         }
 
-        int total = SYNC_SIZE + HEADER_SIZE + 1 + nf * FLOAT_SIZE + CRC_SIZE;
-        if ((int)buffer_.size() < total) {
-            // Frame not fully arrived yet. Come back next call.
+        size_t total = syncIdx + FRAME_OVERHEAD + plen;
+        if (buffer_.size() < total) {
+            // Frame not fully arrived yet. Stay parked at this sync.
+            scan_pos_ = syncIdx;
             return -2;
         }
 
-        // CRC over [hdr_hi, hdr_lo, numFloats, float_bytes] — sync excluded.
-        uint16_t computed = crc16_ccitt((const uint8_t*)&buffer_[SYNC_SIZE],
-                                          HEADER_SIZE + 1 + nf * FLOAT_SIZE);
-        uint16_t received = (uint16_t)(uint8_t)buffer_[total - 2]
-                          | ((uint16_t)(uint8_t)buffer_[total - 1] << 8);
+        // CRC over [hdr][len][bytes] — sync excluded.
+        uint16_t computed = crc16_ccitt(&buffer_[syncIdx + SYNC_SIZE], HEADER_SIZE + LEN_SIZE + plen);
+        uint16_t received = (uint16_t)buffer_[total - 2]
+                          | ((uint16_t)buffer_[total - 1] << 8);
 
         if (computed != received) {
-            // False sync match or real frame got corrupted. Drop the sync;
-            // rescan finds the next.
-            buffer_.erase(buffer_.begin(), buffer_.begin() + SYNC_SIZE);
+            // False sync match or corrupted frame. Advance past this sync byte.
+            scan_pos_ = syncIdx + 1;
             lastStatus = -3;
             continue;
         }
 
         // Valid frame.
         header = hdr;
-        data.resize(nf);
-        for (int i = 0; i < nf; i++) {
-            memcpy(&data[i],
-                   &buffer_[SYNC_SIZE + HEADER_SIZE + 1 + i * FLOAT_SIZE],
-                   FLOAT_SIZE);
+        len = plen;
+        if (plen > 0) {
+            std::memcpy(bytes, &buffer_[syncIdx + SYNC_SIZE + HEADER_SIZE + LEN_SIZE], plen);
         }
         buffer_.erase(buffer_.begin(), buffer_.begin() + total);
+        scan_pos_ = 0;
 
         timeoutFlag = false;
         lastTimeoutClock = std::chrono::steady_clock::now();
         return 1;
     }
+}
 
-    return lastStatus;
+int UART_Serial::receiveMessage(uint8_t& header, float* data, uint8_t& numFloats) {
+    uint8_t buf[MAX_PAYLOAD];
+    uint8_t len = 0;
+    int rc = receiveMessage(header, buf, len);
+    if (rc != 1) {
+        numFloats = 0;
+        return rc;
+    }
+    if (len % 4 != 0) {
+        numFloats = 0;
+        return -6;
+    }
+    numFloats = len / 4;
+    if (numFloats > 0) {
+        std::memcpy(data, buf, len);
+    }
+    return 1;
 }
 
 uint16_t UART_Serial::crc16_ccitt(const uint8_t* data, int len) {
@@ -243,49 +269,47 @@ uint16_t UART_Serial::crc16_ccitt(const uint8_t* data, int len) {
 
 void UART_Serial::readFromSerial() {
     while (running_) {
-        char temp[1024];
+        uint8_t temp[1024];
         boost::system::error_code ec;
         std::size_t bytes_read = serial_.read_some(boost::asio::buffer(temp), ec);
 
         if (ec && ec != boost::asio::error::would_block) {
+            // VTIME=1 makes idle reads return 0 bytes successfully; only a
+            // genuine error (device removed, EOF on a closed FD) lands here.
+            // Back off so we don't burn a core and flood stderr.
             std::cerr << "Error reading from serial port: " << ec.message() << std::endl;
-            // Back off after a persistent error (e.g. device disappeared,
-            // repeated EOF) so we don't burn a core and flood stderr.
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
             continue;
         }
 
-        std::lock_guard<std::mutex> lock(buffer_mutex_);
-        buffer_.insert(buffer_.end(), temp, temp + bytes_read);
-        //TODO: this could technically overfill if read is not being called...
+        if (bytes_read > 0) {
+            std::lock_guard<std::mutex> lock(buffer_mutex_);
+            buffer_.insert(buffer_.end(), temp, temp + bytes_read);
 
-
-        std::this_thread::sleep_for(std::chrono::microseconds(5 * byteSpacingTime_us));//this is kinda arbitrary (could be specified)
-    }
-}
-
-void UART_Serial::handleSynchronization() {
-    while (running_) {
-        if (seekingFlag) {
-            bool flushResult = asyncFlushIncomingSerial();
-            if (flushResult) {
-                // Reset timeout clock before clearing seekingFlag so receiveMessage()
-                // never sees seekingFlag=false with a stale lastTimeoutClock.
-                {
-                    std::lock_guard<std::mutex> lock(buffer_mutex_);
-                    lastTimeoutClock = std::chrono::steady_clock::now();
-                }
-                seekingFlag = false;
+            // Cap buffer at BUFFER_CAP — drop oldest half on overflow so the
+            // consumer can recover via CRC instead of seeing unbounded growth.
+            if (buffer_.size() > BUFFER_CAP) {
+                size_t drop = buffer_.size() - BUFFER_CAP / 2;
+                buffer_.erase(buffer_.begin(), buffer_.begin() + drop);
+                scan_pos_ = 0;
+                dropped_bytes_.fetch_add(drop);
             }
+
+            // Hold the lock across the inter-iteration sleep. This is
+            // load-bearing: releasing the lock per-iteration was tried in
+            // commit dddd198 and tanked rx throughput from ~50 Hz to ~0.6 Hz
+            // because there was no other consumer to grab it (the old sync
+            // thread cleared the buffer mid-frame). Even with the sync thread
+            // gone, a tight per-iteration lock-acquire pattern is wasteful;
+            // batch under one lock.
+            std::this_thread::sleep_for(std::chrono::microseconds(5 * byteSpacingTime_us));
         }
-        std::this_thread::sleep_for(std::chrono::microseconds(byteSpacingTime_us));
     }
 }
 
 void UART_Serial::startWorkThreads() {
     running_ = true;
     read_thread_ = std::thread(&UART_Serial::readFromSerial, this);
-    sync_thread_ = std::thread(&UART_Serial::handleSynchronization, this);
 }
 
 void UART_Serial::stopWorkThreads() {
@@ -293,8 +317,4 @@ void UART_Serial::stopWorkThreads() {
     if (read_thread_.joinable()) {
         read_thread_.join();
     }
-    if (sync_thread_.joinable()) {
-        sync_thread_.join();
-    }
 }
-

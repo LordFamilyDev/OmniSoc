@@ -1,97 +1,63 @@
-#include "Arduino_LED_Matrix.h"   // Include the LED_Matrix library
-
-ArduinoLEDMatrix matrix;          // Create an instance of the ArduinoLEDMatrix class
-uint8_t frame[8][12] = {0};
+//Arduino Mega test
 
 #include "SerialManager.h"
+#include "PackBytes.h"
 
-//SerialManager omniSoc(Serial,20);
-SerialManager omniSoc(Serial,20);
+SerialManager omniSoc(Serial2, 20);
 
-long period_serial_ms = 100;
-long serialClock = 0;
+const long period_telem_ms = 100;
+long telemClock = 0;
 
-long period_debug_print_ms = 500;
+const long period_debug_ms = 500;
 long debugClock = 0;
 
-float data[5] = {0,0,0,0,0}; //needs to be as biggest message to be received
+// Reuse the same RX buffer every loop. Sized to the protocol max payload.
+uint8_t rxBuf[SerialManager::MAX_PAYLOAD];
 
 
 void setup() {
-  //Serial.begin(115200); //for debugging arduino to arduino coms with a mega
   omniSoc.connect(57600);
-  matrix.begin(); 
-  frame[0][0] = 1;
+  Serial.begin(5700); //debug serial
 }
 
-void toggleLED(int x,int y)
-{
-  if(frame[x][y] == 1)
-  {
-    frame[x][y] = 0;
-  }
-  else
-  {
-    frame[x][y] = 1;
-  }
-}
 
 void loop() {
-  matrix.renderBitmap(frame, 8, 12);
 
-  omniSoc.handleSynchronization();
-
-  //handle incoming message (assuming non-fixed frequency coms)
+  // MUST be called every loop iteration. receiveMessage() is the only thing
+  // draining the HardwareSerial RX buffer; skipping calls > ~10ms (at 57600
+  // baud) overflows the 64 B HW buffer and drops bytes silently.
+  uint8_t header = 0;
+  uint8_t len = 0;
+  int receiveCode = omniSoc.receiveMessage(header, rxBuf, len);
+  if (receiveCode == 1)  // new frame
   {
-    int header = 0;
-    int numFloats = 0;
-    //read arbitrary data
-    int receiveCode = omniSoc.receiveMessage(header,data,numFloats);
-    if(receiveCode == 1) //new message
-    {
-      toggleLED(0,0);
 
-      //omnisoc testing
-      //modify and reflect message
-      {
-        header+=1;
-        omniSoc.sendMessage(header,data,numFloats);
-      }
-    }
+    // Echo back with header bumped — interop sanity check for testing.
+    omniSoc.sendMessage(header + 1, rxBuf, len);
   }
 
-  //regular frequency messaging
-  if(millis() - serialClock > period_serial_ms)
+  // Periodic telemetry: uint32 tick + float sample + uint32 millis() = 12 B.
+  // Demonstrates mixed-type packing (the whole point of the bytes payload).
+  if (millis() - telemClock > period_telem_ms)
   {
-    serialClock = millis();
+    telemClock = millis();
 
-    toggleLED(1,1);
-    {
-      int header = 1;
-      float tempData[3] = {1.23, 4.56, (float)millis()};
-      int numFloats = 3;
-      //send arbitrary data
-      int result = omniSoc.sendMessage(header,tempData,numFloats);
+    uint8_t txBuf[12];
+    uint8_t* p = txBuf;
+    p = pack_u32(p, (uint32_t)telemClock);
+    p = pack_float(p, 1.23f);
+    p = pack_u32(p, (uint32_t)millis());
 
-      if(result == -1)
-      {
-        toggleLED(5,5);
-      }
-      //Serial.println(result);
-    }
+    int result = omniSoc.sendMessage(1, txBuf, (uint8_t)(p - txBuf));
   }
 
-  //random messaging (for commands or non-regular coms)
-  if(millis() - debugClock > period_debug_print_ms + random(1,100))
+  // Sporadic debug message: single uint16 status code.
+  if (millis() - debugClock > period_debug_ms + random(1, 100))
   {
     debugClock = millis();
 
-    toggleLED(2,2);
-
-    int header = 5;
-    float tempData[1] = {5000};
-    int numFloats = 1;
-    //send arbitrary data
-    int result = omniSoc.sendMessage(header,tempData,numFloats);
+    uint8_t dbgBuf[2];
+    pack_u16(dbgBuf, 5000);
+    omniSoc.sendMessage(5, dbgBuf, sizeof(dbgBuf));
   }
 }

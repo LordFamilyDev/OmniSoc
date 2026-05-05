@@ -3,11 +3,19 @@ import struct
 import time
 import random
 
-# OmniSoc UART framing v2:
-#   [0xA5][0x5A][hdr_hi][hdr_lo][numFloats][float bytes][crc16_lo][crc16_hi]
-# Sync bytes are an advisory pre-filter (float bytes can collide); CRC-16
+# OmniSoc UART framing v3:
+#   [0xA5][0x5A][hdr:1][len:1][bytes:0..MAX_PAYLOAD][crc16_lo][crc16_hi]
+#
+# Sync bytes are an advisory pre-filter (payload bytes can collide); CRC-16
 # (CCITT-FALSE: poly 0x1021, init 0xFFFF, no reflection, no xorout) computed
-# over [hdr, numFloats, floats] is the actual frame-validity authority.
+# over [hdr, len, bytes] is the actual frame-validity authority.
+#
+# Payload is opaque bytes. Use struct.pack/unpack with little-endian format
+# strings ('<I', '<f', '<H' etc.) to compose typed fields. Mirrors the C++
+# and Arduino PackBytes.h helpers — same wire bytes.
+#
+# Total frame size: 6 + len bytes (max 6 + 48 = 54).
+
 
 def _crc16_ccitt(data):
     """CRC-16/CCITT-FALSE. crc16_ccitt(b'123456789') == 0x29B1."""
@@ -25,11 +33,14 @@ def _crc16_ccitt(data):
 class SerialManager:
     SYNC_0 = 0xA5
     SYNC_1 = 0x5A
+    SYNC_BYTES = bytes([SYNC_0, SYNC_1])
     SYNC_SIZE = 2
-    HEADER_SIZE = 2
+    HEADER_SIZE = 1
+    LEN_SIZE = 1
     CRC_SIZE = 2
-    FLOAT_SIZE = 4
-    MAX_FLOATS = 10
+    FRAME_OVERHEAD = SYNC_SIZE + HEADER_SIZE + LEN_SIZE + CRC_SIZE  # 6
+    MAX_PAYLOAD = 48
+    MAX_FLOATS = MAX_PAYLOAD // 4  # 12
 
     def __init__(self, port='/dev/ttyUSB0', timeout_ms=20):
         """Initialize the serial manager with port and timeout settings"""
@@ -39,8 +50,8 @@ class SerialManager:
         self.timeout_period_ms = timeout_ms
         self.last_timeout_clock = time.time() * 1000
         self.timeout_flag = True
-        self.seeking_flag = True
         self._rx_buf = bytearray()
+        self._scan_pos = 0
 
     def connect(self, baud_rate=57600):
         """Connect to the serial port with specified baud rate"""
@@ -66,44 +77,51 @@ class SerialManager:
         return not self.timeout_flag and self.serial.is_open
 
     def send_message(self, header, data):
-        """Send an OmniSoc v2 frame with header and float data."""
+        """Send an OmniSoc v3 frame with 1-byte header and opaque byte payload.
+
+        Args:
+            header: int 0..255
+            data:   bytes-like, 0..MAX_PAYLOAD bytes
+
+        Returns 1 on success, -1 on failure.
+        """
         if not self.serial.is_open:
             return -1
-
-        num_floats = len(data)
-        if num_floats > self.MAX_FLOATS:
-            print(f"Error: Too many floats ({num_floats} > {self.MAX_FLOATS})")
+        if not (0 <= header <= 0xFF):
+            return -1
+        n = len(data)
+        if n > self.MAX_PAYLOAD:
             return -1
 
         message = bytearray()
-        # Sync bytes (advisory pre-filter — not in CRC).
         message.append(self.SYNC_0)
         message.append(self.SYNC_1)
-        # Header (big-endian).
-        message.extend(header.to_bytes(2, 'big'))
-        # numFloats.
-        message.append(num_floats)
-        # Float payload.
-        for value in data:
-            message.extend(struct.pack('<f', value))
-        # CRC over [hdr, numFloats, floats] — sync excluded. Stored little-endian.
+        message.append(header)
+        message.append(n)
+        message.extend(data)
         crc = _crc16_ccitt(message[self.SYNC_SIZE:])
         message.append(crc & 0xFF)
         message.append((crc >> 8) & 0xFF)
 
         try:
-            bytes_written = self.serial.write(message)
-            return 1 if bytes_written == len(message) else -1
+            written = self.serial.write(message)
+            return 1 if written == len(message) else -1
         except serial.SerialException as e:
             print(f"Send error: {e}")
             return -1
 
-    def receive_message(self):
-        """Receive and parse one frame; returns (header, data) or (None, None).
+    def send_message_floats(self, header, floats):
+        """Convenience wrapper: pack a sequence of floats little-endian and send."""
+        if len(floats) > self.MAX_FLOATS:
+            return -1
+        data = struct.pack('<' + 'f' * len(floats), *floats)
+        return self.send_message(header, data)
 
-        Maintains an internal byte buffer. Each call drains any new bytes from
-        the serial port, scans for the sync sequence, then validates with CRC.
-        Mirrors the Arduino/CPP parser semantics.
+    def receive_message(self):
+        """Receive and parse one v3 frame.
+
+        Returns (header: int, data: bytes) on success, or (None, None) if no
+        complete valid frame is available yet.
         """
         if not self.serial.is_open:
             return None, None
@@ -112,76 +130,94 @@ class SerialManager:
         if self.serial.in_waiting:
             self._rx_buf.extend(self.serial.read(self.serial.in_waiting))
 
-        while len(self._rx_buf) >= self.SYNC_SIZE:
-            # Find next 0xA5 0x5A.
-            n = len(self._rx_buf)
-            sync_idx = -1
-            for i in range(n - 1):
-                if self._rx_buf[i] == self.SYNC_0 and self._rx_buf[i + 1] == self.SYNC_1:
-                    sync_idx = i
-                    break
+        while True:
+            # Compact if scan_pos has crept too far forward.
+            if self._scan_pos > 0 and self._scan_pos > len(self._rx_buf) // 2:
+                del self._rx_buf[:self._scan_pos]
+                self._scan_pos = 0
+
+            if len(self._rx_buf) < self._scan_pos + self.SYNC_SIZE:
+                return None, None
+
+            # Find next 0xA5 0x5A starting at scan_pos.
+            sync_idx = self._rx_buf.find(self.SYNC_BYTES, self._scan_pos)
 
             if sync_idx < 0:
-                # No sync. Drop everything except the trailing byte (might be
-                # 0xA5 starting a sync that hasn't completed yet).
-                if n > 1:
-                    last = self._rx_buf[-1]
-                    self._rx_buf.clear()
-                    self._rx_buf.append(last)
+                # No sync. Preserve the trailing byte (could be a 0xA5 with
+                # 0x5A still pending in the kernel buffer).
+                if len(self._rx_buf) > 1:
+                    self._scan_pos = len(self._rx_buf) - 1
+                else:
+                    self._scan_pos = 0
                 return None, None
 
-            # Drop pre-sync junk.
-            if sync_idx > 0:
-                del self._rx_buf[:sync_idx]
-
-            # Need sync + header + count = 5 bytes minimum.
-            if len(self._rx_buf) < self.SYNC_SIZE + self.HEADER_SIZE + 1:
+            # Need sync + header + len = 4 bytes minimum.
+            if len(self._rx_buf) < sync_idx + self.SYNC_SIZE + self.HEADER_SIZE + self.LEN_SIZE:
+                self._scan_pos = sync_idx
                 return None, None
 
-            hdr = (self._rx_buf[self.SYNC_SIZE] << 8) | self._rx_buf[self.SYNC_SIZE + 1]
-            nf = self._rx_buf[self.SYNC_SIZE + self.HEADER_SIZE]
+            hdr = self._rx_buf[sync_idx + self.SYNC_SIZE]
+            plen = self._rx_buf[sync_idx + self.SYNC_SIZE + self.HEADER_SIZE]
 
-            if nf > self.MAX_FLOATS:
-                # Implausible numFloats — false sync. Drop the sync bytes only.
-                del self._rx_buf[:self.SYNC_SIZE]
+            if plen > self.MAX_PAYLOAD:
+                # False sync. Advance one byte and rescan.
+                self._scan_pos = sync_idx + 1
                 continue
 
-            total = self.SYNC_SIZE + self.HEADER_SIZE + 1 + nf * self.FLOAT_SIZE + self.CRC_SIZE
+            total = sync_idx + self.FRAME_OVERHEAD + plen
             if len(self._rx_buf) < total:
-                return None, None  # frame not fully arrived
+                # Frame not fully arrived yet.
+                self._scan_pos = sync_idx
+                return None, None
 
-            # CRC over [hdr, numFloats, floats] — sync excluded.
-            payload = bytes(self._rx_buf[self.SYNC_SIZE:total - self.CRC_SIZE])
-            computed = _crc16_ccitt(payload)
+            # CRC over [hdr][len][bytes] — sync excluded.
+            payload_start = sync_idx + self.SYNC_SIZE
+            payload_end = total - self.CRC_SIZE
+            computed = _crc16_ccitt(bytes(self._rx_buf[payload_start:payload_end]))
             received = self._rx_buf[total - 2] | (self._rx_buf[total - 1] << 8)
 
             if computed != received:
-                # False sync match or real frame got corrupted. Drop sync;
-                # rescan finds the next.
-                del self._rx_buf[:self.SYNC_SIZE]
+                # False sync match or corrupted frame. Advance past this sync byte.
+                self._scan_pos = sync_idx + 1
                 continue
 
             # Valid frame.
-            float_bytes_offset = self.SYNC_SIZE + self.HEADER_SIZE + 1
-            float_data = []
-            for i in range(nf):
-                start = float_bytes_offset + i * self.FLOAT_SIZE
-                end = start + self.FLOAT_SIZE
-                value = struct.unpack('<f', bytes(self._rx_buf[start:end]))[0]
-                float_data.append(value)
+            data_offset = sync_idx + self.SYNC_SIZE + self.HEADER_SIZE + self.LEN_SIZE
+            data = bytes(self._rx_buf[data_offset:data_offset + plen])
             del self._rx_buf[:total]
+            self._scan_pos = 0
 
             self.timeout_flag = False
             self.last_timeout_clock = time.time() * 1000
-            return hdr, float_data
+            return hdr, data
 
-        return None, None
+    def receive_message_floats(self):
+        """Convenience wrapper: receive a frame and unpack as floats.
+
+        Returns (header, [float, ...]) on success, (None, None) if no frame,
+        or (header, None) if the payload length isn't a multiple of 4 bytes.
+        """
+        hdr, data = self.receive_message()
+        if hdr is None:
+            return None, None
+        if len(data) % 4 != 0:
+            return hdr, None
+        n = len(data) // 4
+        floats = list(struct.unpack('<' + 'f' * n, data))
+        return hdr, floats
 
     def flush_incoming(self):
-        """Clear any remaining data in the input buffer"""
+        """Drop all buffered serial input + reset internal parser state.
+
+        Use after mode switches or when the application detects prolonged
+        corruption and wants to start fresh. Not used for automatic resync —
+        CRC-16 handles that.
+        """
         if self.serial.is_open:
             self.serial.reset_input_buffer()
         self._rx_buf.clear()
+        self._scan_pos = 0
+
 
 def main():
     # Example usage
@@ -192,29 +228,29 @@ def main():
     try:
         print("Starting communication test...")
         while True:
-            # Send a test message
-            test_data = [1.23, 4.56, time.time()]
-            result = manager.send_message(1, test_data)
+            # Send a mixed-type telemetry message: uint32 tick + float angle + uint32 ms.
+            payload = struct.pack('<IfI', int(time.time()), 1.23, int(time.time() * 1000) & 0xFFFFFFFF)
+            result = manager.send_message(1, payload)
             if result > 0:
-                print(f"Sent message with data: {test_data}")
+                print(f"Sent telemetry ({len(payload)} bytes)")
 
-            # Receive any incoming messages
+            # Receive any incoming messages.
             header, data = manager.receive_message()
             if header is not None:
-                print(f"Received message - Header: {header}, Data: {data}")
+                print(f"Received - Header: {header}, Data ({len(data)} B): {data.hex()}")
 
-            # Random debug message (similar to Arduino example)
-            if random.random() < 0.1:  # 10% chance each loop
-                debug_data = [5000.0]
-                manager.send_message(5, debug_data)
+            # Sporadic debug message: single uint16 status code.
+            if random.random() < 0.1:
+                manager.send_message(5, struct.pack('<H', 5000))
                 print("Sent debug message")
 
-            time.sleep(0.01)  # 10ms delay to match Arduino example
+            time.sleep(0.01)
 
     except KeyboardInterrupt:
         print("\nExiting...")
     finally:
         manager.disconnect()
+
 
 if __name__ == "__main__":
     main()

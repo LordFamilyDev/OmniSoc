@@ -25,7 +25,8 @@ OmniSoc is a cross-platform, cross-language serial communication library targeti
 - Async (threaded) and sync (polling) operation modes
 - Auto-reconnect with configurable heartbeat/timeout detection
 - Thread-safe message queuing (mutex-backed buffers)
-- Binary message framing: 2-byte header + float count + float payload (up to 10 floats) + XOR checksum
+- UART binary framing v3: 2-byte sync (0xA5 0x5A) + 1-byte header + 1-byte length + opaque byte payload (up to 48 B) + CRC-16/CCITT-FALSE
+- `PackBytes.h` helpers (C++/Arduino) and `struct.pack/unpack` (Python) for typed field composition inside the byte payload
 - Socket heartbeat: empty delimiter (`;`) sent periodically to detect stale connections
 
 **Supported Platforms:** Linux, Windows, macOS, Arduino, Raspberry Pi, Android, iOS, Unity
@@ -45,7 +46,7 @@ OmniSoc is a cross-platform, cross-language serial communication library targeti
 
 **Known TODOs / Limitations:**
 - BLE implementation is missing entirely
-- Arduino limited to 10 floats/message (set by `maxFloats`); AVR boards have a 64-byte RX hardware buffer which informed this limit, but it applies to all Arduino targets
+- UART payload capped at 48 bytes (`MAX_PAYLOAD`); chosen so a max-size frame (54 B) fits comfortably under the AVR 64 B HW UART RX buffer
 - No on-demand heartbeat (connection health only detectable when messaging regularly)
 - No protocol buffers or MessagePack support (noted as future enhancement)
 - Baud rate must be manually calculated to avoid overrun
@@ -73,16 +74,18 @@ OS / Hardware
 ```
 
 **Threading (C++ async mode):**
-- `sync_thread_` — manages seekingFlag / resync after corrupt messages
-- `read_thread_` — blocking read loop, feeds bytes into the internal buffer
-- Main thread / caller — calls `receiveMessage()` / `sendMessage()` directly
+- `read_thread_` — bounded read loop (kernel-side VTIME=100ms timeout via termios) that drains the serial port into a mutex-guarded internal buffer
+- Main thread / caller — calls `receiveMessage()` / `sendMessage()` directly. `receiveMessage()` does sync-scan + CRC-validate parsing on demand.
 
-**Sync mode** (Arduino, or debugging): caller drives updates via `synchronousUpdate()` / `handleSynchronization()` in the main loop.
+**Arduino mode**: single-threaded. Caller MUST invoke `receiveMessage()` every main loop iteration — it's the only thing draining the HardwareSerial RX buffer. Skipping calls > ~10 ms (at 57600 baud) overflows the 64 B HW buffer.
 
-**UART Message Format:**
+**UART Message Format (v3):**
 ```
-[Header (2B, user-defined int)] [Float Count (1B)] [Float Data (N×4B)] [XOR Checksum (1B)]
-Max payload: 10 floats = 43 bytes/message (limit set by maxFloats constant, not hardware)
+[Sync 0xA5 0x5A] [Header (1B)] [Length (1B)] [Payload bytes (N)] [CRC-16 (2B, little-endian)]
+Total: 6 + N bytes. Max payload N = 48 → max frame 54 B.
+CRC-16/CCITT-FALSE (poly 0x1021, init 0xFFFF) covers [Header][Length][Payload] only — sync excluded.
+Payload is opaque bytes; use PackBytes.h (C++/Arduino) or struct.pack (Python) for typed fields.
+Float-array convenience overloads of sendMessage/receiveMessage exist for backward-shaped code.
 ```
 
 **Socket Message Format:**
@@ -107,6 +110,7 @@ OmniSoc/
 │   ├── Readme.md                    # Build and usage instructions
 │   ├── include/
 │   │   ├── UART_Serial.h            # UART class interface
+│   │   ├── PackBytes.h              # Typed pack/unpack helpers for byte payloads
 │   │   ├── Socket_Serial.h          # TCP socket class interface (client + server)
 │   │   └── BLE_Serial.h             # BLE stub (empty)
 │   └── src/
@@ -120,7 +124,8 @@ OmniSoc/
 │   ├── README.md
 │   ├── Arduino_UART.ino             # Example sketch
 │   ├── SerialManager.h
-│   └── SerialManager.cpp
+│   ├── SerialManager.cpp
+│   └── PackBytes.h                  # Mirror of CPP_OmniSoc/include/PackBytes.h
 
 ├── Python_UART/                     # Python implementation
 │   └── omnisoc_serial.py            # Pure Python; only external dep is PySerial
@@ -152,6 +157,7 @@ OmniSoc/
 
 **Linux serial ports (Boost ASIO)**
 - Boost ASIO opens serial ports with `O_NONBLOCK` but does not clear `ICANON` (canonical/line mode). In canonical mode the kernel buffers binary data until a newline arrives, so no bytes are delivered to `read()`. If adding new platforms or seeing `buf:0` in diagnostics, ensure the port is configured for raw mode.
+- Graceful shutdown is bounded by termios `VMIN=0, VTIME=1` (100 ms) configured after `cfmakeraw()` in `connect()`. This makes blocking `read_some()` calls return on idle so `disconnect()` → `join()` completes within ~100 ms instead of deadlocking. **Do not switch to user-space `poll()`** — a previous attempt (commits dddd198 + 8535766, reverted in 17d2499) caused mysterious gimbal-shake regression in PT_Forwarder; root cause never identified. Keeping the timeout in the kernel avoids changing user-space read/write interleaving.
 
 ---
 

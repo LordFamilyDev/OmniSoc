@@ -6,6 +6,7 @@
 #include <mutex>
 #include <atomic>
 #include <chrono>
+#include <csignal>
 #include "UART_Serial.h"
 
 #ifdef _WIN32
@@ -57,16 +58,22 @@ std::mutex            recvMutex;
 ReceivedMsg           latestMsg;
 std::atomic<bool>     killCommand(false);
 
+// SIGINT/SIGTERM-driven stop. Set by signal handler so kill -TERM cleanly
+// exits (the interactive 'x' path still works for stdin-driven exit).
+static std::atomic<bool> g_stop{false};
+static void on_signal(int) { g_stop = true; killCommand = true; }
+
 void receiveThread_doWork(std::shared_ptr<UART_Serial> serial)
 {
-    while (!killCommand)
+    while (!killCommand && !g_stop)
     {
-        int header = 0;
-        std::vector<float> data;
-        if (serial->receiveMessage(header, data) == 1)
+        uint8_t header = 0;
+        float data[UART_Serial::MAX_FLOATS];
+        uint8_t numFloats = 0;
+        if (serial->receiveMessage(header, data, numFloats) == 1)
         {
             std::lock_guard<std::mutex> lock(recvMutex);
-            latestMsg = { header, data, true };
+            latestMsg = { header, std::vector<float>(data, data + numFloats), true };
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
@@ -75,7 +82,7 @@ void receiveThread_doWork(std::shared_ptr<UART_Serial> serial)
 // ── Input parsing ─────────────────────────────────────────────────────────────
 // Expected format: <header_int>,<float>,<float>,...   e.g.  7,1.0,2.5,3.0
 
-bool parseInput(const std::string& line, int& header, std::vector<float>& floats)
+bool parseInput(const std::string& line, uint8_t& header, std::vector<float>& floats)
 {
     std::istringstream ss(line);
     std::string token;
@@ -93,14 +100,16 @@ bool parseInput(const std::string& line, int& header, std::vector<float>& floats
 
     try
     {
-        header = std::stoi(tokens[0]);
+        int hdr = std::stoi(tokens[0]);
+        if (hdr < 0 || hdr > 255) return false;
+        header = (uint8_t)hdr;
         floats.clear();
         for (size_t i = 1; i < tokens.size(); ++i)
             floats.push_back(std::stof(tokens[i]));
     }
     catch (...) { return false; }
 
-    if (floats.size() > static_cast<size_t>(UART_Serial::maxFloats)) return false;
+    if (floats.size() > static_cast<size_t>(UART_Serial::MAX_FLOATS)) return false;
 
     return true;
 }
@@ -109,7 +118,10 @@ bool parseInput(const std::string& line, int& header, std::vector<float>& floats
 
 int main()
 {
-    std::cout << "OmniSoc UART Tester  |  'x' to exit\n\n";
+    std::signal(SIGINT,  on_signal);
+    std::signal(SIGTERM, on_signal);
+
+    std::cout << "OmniSoc UART Tester  |  'x' to exit (or SIGINT/SIGTERM)\n\n";
 
     // List available ports
     auto ports = listPorts();
@@ -139,11 +151,15 @@ int main()
 
     std::thread recvThread(receiveThread_doWork, serial);
 
-    while (!killCommand)
+    while (!killCommand && !g_stop)
     {
         std::cout << "> ";
         std::string line;
-        std::getline(std::cin, line);
+        if (!std::getline(std::cin, line))
+        {
+            // EOF or stream error (e.g. SIGTERM closed stdin via terminal): exit cleanly.
+            break;
+        }
 
         if (line == "x" || line == "X")
         {
@@ -152,18 +168,18 @@ int main()
         }
         if (line.empty()) continue;
 
-        int header;
+        uint8_t header;
         std::vector<float> floats;
         if (!parseInput(line, header, floats))
         {
-            std::cout << "  [invalid] format: <header_int>,<float>,<float>,...\n";
+            std::cout << "  [invalid] format: <header_int 0..255>,<float>,<float>,...\n";
             continue;
         }
 
         if (!serial->isConnected())
             std::cout << "  [not yet connected — sending anyway]\n";
 
-        serial->sendMessage(header, floats);
+        serial->sendMessage(header, floats.data(), (uint8_t)floats.size());
 
         // Brief wait so a reply has a chance to arrive before we display
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
